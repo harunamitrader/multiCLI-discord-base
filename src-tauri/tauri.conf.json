@@ -1,0 +1,61 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Codex Discord Connected Display",
+  "version": "0.1.0",
+  "identifier": "io.github.harunamitrader.codicodi",
+  "build": {
+    "frontendDist": "../ui",
+    "devUrl": "http://127.0.0.1:3187",
+    "beforeDevCommand": "npm run start"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Codex Discord Connected Display",
+        "width": 1440,
+        "height": 960,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
+      },
+      {
+        "label": "splash",
+        "title": "Starting Codex Discord Connected Display",
+        "url": "splash.html",
+        "width": 420,
+        "height": 300,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "resources": [
+      "../server",
+      "../ui",
+      "../.env"
+      ,"../package.json"
+      ,"../package-lock.json"
+      ,"../node_modules"
+    ],
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

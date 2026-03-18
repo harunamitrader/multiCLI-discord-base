@@ -1,0 +1,270 @@
+import fs from "node:fs";
+import path from "node:path";
+import http from "node:http";
+
+function sendJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
+  response.end(JSON.stringify(payload));
+}
+
+async function readJsonBody(request) {
+  const chunks = [];
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+
+  if (chunks.length === 0) {
+    return {};
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function serveFile(response, filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  const contentTypes = {
+    ".bmp": "image/bmp",
+    ".html": "text/html; charset=utf-8",
+    ".gif": "image/gif",
+    ".css": "text/css; charset=utf-8",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
+    ".webmanifest": "application/manifest+json; charset=utf-8",
+    ".webp": "image/webp",
+  };
+
+  if (!fs.existsSync(filePath)) {
+    response.writeHead(404);
+    response.end("Not found");
+    return;
+  }
+
+  response.writeHead(200, {
+    "Content-Type": contentTypes[extension] || "application/octet-stream",
+  });
+
+  fs.createReadStream(filePath).pipe(response);
+}
+
+function serveUploadsFile(response, uploadsDir, pathname) {
+  const relativePath = decodeURIComponent(pathname.replace(/^\/uploads\//, ""));
+  const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+  const rootDir = path.resolve(uploadsDir);
+  const filePath = path.resolve(rootDir, safePath);
+
+  if (!filePath.startsWith(rootDir)) {
+    response.writeHead(403);
+    response.end("Forbidden");
+    return;
+  }
+
+  serveFile(response, filePath);
+}
+
+function buildRequestUrl(request) {
+  return new URL(request.url || "/", "http://localhost");
+}
+
+export function createHttpServer({ config, bridge, bus, discord, attachments }) {
+  return http.createServer(async (request, response) => {
+    try {
+      const url = buildRequestUrl(request);
+      const pathname = url.pathname;
+
+      if (pathname === "/api/health" && request.method === "GET") {
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      if (pathname === "/api/runtime" && request.method === "GET") {
+        sendJson(response, 200, bridge.getRuntimeInfo());
+        return;
+      }
+
+      if (pathname === "/api/discord/channels" && request.method === "GET") {
+        const channels = await discord.getSelectableChannels();
+        sendJson(response, 200, { channels });
+        return;
+      }
+
+      if (pathname === "/api/stream" && request.method === "GET") {
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+
+        const cleanup = bus.addSseClient(response);
+        request.on("close", cleanup);
+        return;
+      }
+
+      if (pathname.startsWith("/uploads/") && request.method === "GET") {
+        serveUploadsFile(response, config.uploadsDir, pathname);
+        return;
+      }
+
+      if (pathname === "/api/sessions" && request.method === "GET") {
+        sendJson(response, 200, bridge.listSessions());
+        return;
+      }
+
+      if (pathname === "/api/sessions" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const session = bridge.createSession({
+          title: body.title?.trim() || undefined,
+          discordChannelId: body.discordChannelId?.trim() || null,
+          discordChannelName: body.discordChannelName?.trim() || null,
+          model: body.model?.trim() || undefined,
+          reasoningEffort: body.reasoningEffort?.trim() || undefined,
+          profile: body.profile?.trim() || undefined,
+          fastMode: body.fastMode == null ? undefined : Boolean(body.fastMode),
+        });
+        sendJson(response, 201, session);
+        return;
+      }
+
+      const sessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
+      if (sessionMatch && request.method === "GET") {
+        const detail = bridge.getSessionDetail(sessionMatch[1]);
+        if (!detail) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, detail);
+        return;
+      }
+
+      if (sessionMatch && request.method === "DELETE") {
+        const session = bridge.deleteSession(sessionMatch[1]);
+        if (!session) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, { deleted: true, session });
+        return;
+      }
+
+      const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+      if (messageMatch && request.method === "POST") {
+        if (!bridge.getSession(messageMatch[1])) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        const body = await readJsonBody(request);
+        const text = body.text?.trim() || "";
+        const savedAttachments = await attachments.saveUiAttachments(
+          messageMatch[1],
+          body.attachments,
+        );
+
+        if (!text && savedAttachments.length === 0) {
+          sendJson(response, 400, { error: "text or attachments are required" });
+          return;
+        }
+
+        await bridge.handleIncomingMessage({
+          sessionId: messageMatch[1],
+          text,
+          source: "ui",
+          attachments: savedAttachments,
+        });
+
+        sendJson(response, 202, { accepted: true });
+        return;
+      }
+
+      const bindMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/discord-bind$/);
+      if (bindMatch && request.method === "POST") {
+        const body = await readJsonBody(request);
+        if (!body.channelId?.trim()) {
+          sendJson(response, 400, { error: "channelId is required" });
+          return;
+        }
+
+        const session = bridge.bindDiscordChannelWithName(
+          bindMatch[1],
+          body.channelId.trim(),
+          body.channelName?.trim() || null,
+        );
+        if (!session) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, session);
+        return;
+      }
+
+      const settingsMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/settings$/);
+      if (settingsMatch && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const session = bridge.updateSessionSettings(settingsMatch[1], {
+          model: body.model?.trim() || undefined,
+          reasoningEffort: body.reasoningEffort?.trim() || undefined,
+          profile: body.profile?.trim() || undefined,
+          fastMode:
+            body.fastMode == null ? undefined : Boolean(body.fastMode),
+        });
+        if (!session) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, session);
+        return;
+      }
+
+      const renameMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/rename$/);
+      if (renameMatch && request.method === "POST") {
+        const body = await readJsonBody(request);
+        if (!body.title?.trim()) {
+          sendJson(response, 400, { error: "title is required" });
+          return;
+        }
+
+        const session = bridge.renameSession(renameMatch[1], body.title.trim());
+        if (!session) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, session);
+        return;
+      }
+
+      const stopMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/stop$/);
+      if (stopMatch && request.method === "POST") {
+        const result = bridge.stopSession(stopMatch[1]);
+        if (result.reason === "not_found") {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+      const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
+      const filePath = path.join(config.uiDir, safePath);
+      serveFile(response, filePath);
+    } catch (error) {
+      sendJson(response, error?.statusCode || 500, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+}

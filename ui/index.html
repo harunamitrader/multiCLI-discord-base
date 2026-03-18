@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#eef1f5" />
+    <title>Codex Discord Connected Display</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="eyebrow">Codex Discord Connected Display</span>
+          <h1>CoDiCoDi</h1>
+          <p class="brand-copy">
+            A shared workspace for driving the same Codex session from the local UI and Discord.
+          </p>
+        </div>
+        <button id="install-app-button" class="outline-button install-app-button" type="button" hidden>
+          Install App
+        </button>
+        <button id="new-session-button" class="primary-button">New Session</button>
+        <p id="session-count" class="sidebar-note">0 sessions</p>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="panel-header">
+          <div>
+            <span class="eyebrow">Active Session</span>
+            <h2 id="session-title">No session selected</h2>
+            <p id="session-subtitle" class="panel-subtitle">
+              Select a session from the list or create a new one to begin.
+            </p>
+          </div>
+          <div class="panel-header-actions">
+            <div class="status-pill" id="status-pill" data-status="idle">idle</div>
+            <button id="restore-session-button" class="outline-button header-action-button" type="button">Restore Chat</button>
+            <button id="delete-session-button" class="secondary-button" type="button">Delete Session</button>
+          </div>
+        </header>
+
+        <section class="meta-grid">
+          <article
+            id="session-card"
+            class="meta-card meta-card-button"
+            role="button"
+            tabindex="0"
+          >
+            <span class="meta-label">Session</span>
+            <code id="session-id-value">Not selected</code>
+            <small class="meta-card-hint">Click to rename</small>
+          </article>
+          <article
+            id="discord-channel-card"
+            class="meta-card meta-card-button"
+            role="button"
+            tabindex="0"
+          >
+            <span class="meta-label">Discord Channel</span>
+            <code id="discord-id-value">Not linked</code>
+            <small class="meta-card-hint">Click to set</small>
+          </article>
+        </section>
+
+        <section class="settings-panel">
+          <div class="settings-header">
+            <div>
+              <span class="eyebrow">Codex Settings</span>
+            </div>
+          </div>
+
+          <div class="setting-group">
+            <label>Model</label>
+            <div id="model-options" class="option-grid"></div>
+          </div>
+
+          <div class="setting-group">
+            <label>Reasoning</label>
+            <div id="reasoning-options" class="option-grid"></div>
+          </div>
+
+          <div class="setting-group">
+            <label>Fast mode</label>
+            <div id="fast-options" class="option-grid option-grid-tight">
+              <button id="fast-on-button" class="option-button" type="button">Fast On</button>
+              <button id="fast-off-button" class="option-button" type="button">Fast Off</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="chat-log" class="chat-log"></section>
+
+        <form id="message-form" class="composer">
+          <div class="composer-inputs">
+            <textarea
+              id="message-input"
+              rows="3"
+              placeholder="Type here. This will be queued into the shared Codex session."
+            ></textarea>
+            <div class="composer-toolbar">
+              <input id="attachment-input" type="file" multiple hidden />
+              <button id="attachment-button" class="outline-button composer-attach-button" type="button">
+                Add files
+              </button>
+            </div>
+            <div id="pending-attachment-list" class="pending-attachment-list" hidden></div>
+          </div>
+          <div class="composer-actions">
+            <button id="stop-session-button" class="stop-button" type="button">Stop</button>
+            <button class="primary-button" type="submit">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <dialog id="channel-picker-dialog" class="channel-picker-dialog">
+      <form method="dialog" class="channel-picker-shell">
+        <div class="channel-picker-header">
+          <div>
+            <span class="eyebrow">Discord</span>
+            <h3>Select Channel</h3>
+          </div>
+          <button id="channel-picker-close" class="outline-button" type="submit">Close</button>
+        </div>
+        <div id="channel-picker-list" class="channel-picker-list"></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>

@@ -1,0 +1,12 @@
+node_modules/
+data/
+.env
+*.log
+server-start.err.log
+server-start.out.log
+src-tauri/target/
+.tauri/
+.vscode/
+.idea/
+dist/
+coverage/
