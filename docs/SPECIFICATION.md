@@ -50,7 +50,8 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - Discord 連携
 - 添付ファイル保存
 - ファイル監視
-- 開発者向け raw / formatted log 出力
+- スケジュール実行
+- 開発者コンソール用ログ出力
 
 ### 4.2 ui
 
@@ -67,6 +68,8 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - drag & drop / paste 添付
 - 進捗表示
 - セッション設定変更
+- スケジュール設定変更
+- working directory 選択
 - 開発者コンソール起動
 
 ### 4.3 src-tauri
@@ -101,6 +104,7 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - reasoning effort
 - profile
 - service tier / fast mode
+- working directory
 
 ### 5.2 イベント
 
@@ -128,8 +132,17 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - DB からの会話復元
 - stale session の復旧
 - Discord チャンネル紐付け
+- セッションごとの working directory 切り替え
 
-### 6.2 入力
+### 6.2 スケジュール管理
+
+- cron 形式の定期実行
+- 既存セッション宛て送信
+- 新規セッション生成での送信
+- スケジュール既定 model / reasoning / profile / workdir 保存
+- スケジュール一覧での状態確認
+
+### 6.3 入力
 
 - ローカル UI からのテキスト送信
 - Discord からのテキスト送信
@@ -139,14 +152,15 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - Discord からの一般ファイル送信
 - ローカル UI の drag & drop / paste 添付
 
-### 6.3 Codex 設定
+### 6.4 Codex 設定
 
 - model 切り替え
 - reasoning level 切り替え
 - fast mode 切り替え
 - 実行停止
+- Codex `review` 実行機能は現時点では未提供
 
-### 6.4 表示
+### 6.5 表示
 
 - queued / running / waiting_codex / completed / stopped / error
 - 途中 assistant メッセージ
@@ -154,9 +168,10 @@ Codex Discord Connected Display は、1つの Codex CLI セッションを
 - キュー待ちターン数表示
 - UI 側の経過表示
 - Discord 側の進捗表示
-- 開発者向け raw / formatted console 表示
+- schedule 由来メッセージ表示
+- 開発者コンソール表示
 
-### 6.5 ファイル変更通知
+### 6.6 ファイル変更通知
 
 有効化時は次ができます。
 
@@ -236,7 +251,6 @@ SQLite の保存先:
 - `CODEX_APPROVAL_POLICY`
 - `CODEX_SANDBOX_MODE`
 - `CODEX_BYPASS_APPROVALS_AND_SANDBOX`
-- `CODEX_DEVELOPER_MODE`
 - `DISCORD_BOT_TOKEN`
 - `DISCORD_ALLOWED_GUILD_IDS`
 - `DISCORD_ALLOWED_CHANNEL_IDS`

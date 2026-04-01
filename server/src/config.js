@@ -171,9 +171,19 @@ export function loadConfig() {
   const uiDir = path.resolve(projectRoot, "ui");
   const uploadsDir = path.join(dataDir, "uploads");
   const logsDir = path.join(dataDir, "logs");
+  const schedulesDir = path.join(dataDir, "schedules");
+  const scheduleDefaultsPath = path.join(dataDir, "schedule-defaults.json");
   const codexWorkdir = path.resolve(
     process.env.CODEX_WORKDIR || path.join(os.homedir(), "Desktop", "codex"),
   );
+  if (!fs.existsSync(codexWorkdir)) {
+    throw new Error(`Configured CODEX_WORKDIR was not found: ${codexWorkdir}`);
+  }
+
+  if (!fs.statSync(codexWorkdir).isDirectory()) {
+    throw new Error(`Configured CODEX_WORKDIR is not a directory: ${codexWorkdir}`);
+  }
+
   const availableModels = loadAvailableModels();
   const defaultModel =
     process.env.CODEX_MODEL ||
@@ -224,12 +234,15 @@ export function loadConfig() {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(uploadsDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
+  fs.mkdirSync(schedulesDir, { recursive: true });
 
   return {
     host: process.env.HOST || "127.0.0.1",
     port: Number(process.env.PORT || 3087),
     dataDir,
     uploadsDir,
+    schedulesDir,
+    scheduleDefaultsPath,
     databasePath: path.join(dataDir, "bridge.sqlite"),
     uiDir,
     codexCommand: process.env.CODEX_COMMAND || "codex",
@@ -241,9 +254,8 @@ export function loadConfig() {
       process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX,
       true,
     ),
-    codexDeveloperMode: parseBoolean(process.env.CODEX_DEVELOPER_MODE, false),
     codexDeveloperLogPath: path.join(logsDir, "codex-live.log"),
-    codexDeveloperConsoleLogPath: path.join(logsDir, "codex-console.log"),
+    scheduleLogPath: path.join(logsDir, "schedule-runs.log"),
     appVersion: loadAppVersion(),
     codexVersion: loadCodexVersion(process.env.CODEX_COMMAND || "codex"),
     codexDefaults: {
@@ -251,6 +263,7 @@ export function loadConfig() {
       reasoningEffort: defaultReasoningEffort,
       serviceTier: defaultServiceTier,
       profile: defaultProfile,
+      workdir: codexWorkdir,
     },
     availableModels,
     discordBotToken: process.env.DISCORD_BOT_TOKEN || "",

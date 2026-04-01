@@ -8,6 +8,7 @@ import { BridgeService } from "./bridge.js";
 import { DiscordAdapter } from "./discord-adapter.js";
 import { FileWatcherService } from "./file-watcher.js";
 import { createHttpServer } from "./http-server.js";
+import { SchedulerService } from "./scheduler.js";
 
 async function main() {
   const config = loadConfig();
@@ -19,7 +20,15 @@ async function main() {
   const bridge = new BridgeService({ store, bus, codex, config, attachments });
   const discord = new DiscordAdapter({ bridge, bus, config, attachments });
   const fileWatcher = new FileWatcherService({ config, discord });
-  const server = createHttpServer({ config, bridge, bus, discord, attachments });
+  const scheduler = new SchedulerService({ config, bus });
+  const server = createHttpServer({
+    config,
+    bridge,
+    bus,
+    discord,
+    attachments,
+    scheduler,
+  });
 
   try {
     await discord.start();
@@ -37,13 +46,27 @@ async function main() {
     console.error(error);
   }
 
+  try {
+    await scheduler.init(async (job) =>
+      bridge.triggerScheduledJob({
+        name: job.name,
+        prompt: job.prompt,
+        target: job.target,
+      }),
+    );
+  } catch (error) {
+    console.error("Scheduler failed to start.");
+    console.error(error);
+  }
+
   server.listen(config.port, config.host, () => {
     console.log(
-      `Bridge server running at http://${config.host}:${config.port} using workdir ${config.codexWorkdir}`,
+      `Bridge server running at http://${config.host}:${config.port} with base workdir ${config.codexWorkdir}`,
     );
   });
 
   process.on("SIGINT", async () => {
+    await scheduler.stopAll();
     await fileWatcher.stop();
     await discord.stop();
     bus.close();

@@ -24,6 +24,7 @@ export function createDatabase(databasePath, sessionDefaults) {
       model TEXT,
       model_reasoning_effort TEXT,
       profile TEXT,
+      workdir TEXT,
       service_tier TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -45,6 +46,7 @@ export function createDatabase(databasePath, sessionDefaults) {
   ensureColumn(db, "sessions", "model", "TEXT");
   ensureColumn(db, "sessions", "model_reasoning_effort", "TEXT");
   ensureColumn(db, "sessions", "profile", "TEXT");
+  ensureColumn(db, "sessions", "workdir", "TEXT");
   ensureColumn(db, "sessions", "service_tier", "TEXT");
   ensureColumn(db, "sessions", "discord_channel_name", "TEXT");
 
@@ -55,6 +57,7 @@ export function createDatabase(databasePath, sessionDefaults) {
       model = COALESCE(model, '${escape(sessionDefaults.model)}'),
       model_reasoning_effort = COALESCE(model_reasoning_effort, '${escape(sessionDefaults.reasoningEffort)}'),
       profile = COALESCE(profile, '${escape(sessionDefaults.profile)}'),
+      workdir = COALESCE(workdir, '${escape(sessionDefaults.workdir)}'),
       service_tier = CASE
         WHEN service_tier = 'fast' THEN 'fast'
         WHEN service_tier IS NULL OR TRIM(service_tier) = '' THEN '${escape(sessionDefaults.serviceTier)}'

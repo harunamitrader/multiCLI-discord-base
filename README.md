@@ -58,10 +58,16 @@ https://github.com/harunamitrader/codicodiを導入して。可能な範囲でAI
 - 途中メッセージやコマンド実行メッセージの表示
 - キュー待ちターン数の表示
 - ローカル UI での drag & drop / paste 添付
-- 開発者向け raw / formatted コンソール表示
+- セッションごとの working directory 切り替え
+- cron スケジュールで既存セッションまたは新規セッションへ定期送信
+- 開発者コンソール表示
 - Discord チャンネルとセッションの紐付け
 - 指定フォルダ配下のファイル変更を Discord に通知
 - Tauri デスクトップアプリとして起動
+
+補足:
+
+- Codex の `review` 実行機能は、現時点では UI / bridge ともに提供していません
 
 ## 想定している使い方
 
@@ -236,7 +242,6 @@ CODEX_COMMAND=codex
 CODEX_WORKDIR=C:\Users\your-name\Desktop\codex
 CODEX_ENABLE_SEARCH=true
 CODEX_BYPASS_APPROVALS_AND_SANDBOX=true
-CODEX_DEVELOPER_MODE=false
 DATA_DIR=./data
 DISCORD_BOT_TOKEN=your-bot-token
 DISCORD_ALLOWED_GUILD_IDS=your-server-id
@@ -252,9 +257,7 @@ FILE_LOG_CHANNEL_ID=
 - `CODEX_COMMAND`
   Codex CLI を起動するコマンド名です。通常は `codex` のままで大丈夫です。
 - `CODEX_WORKDIR`
-  Codex が標準で作業するフォルダです。
-- `CODEX_DEVELOPER_MODE`
-  `true` にすると UI に `Open Developer Console` ボタンが出て、Codex CLI の live log を追う PowerShell ウィンドウを開けます。
+  Codex が標準で作業するフォルダです。UI から選べる作業フォルダや、スケジュール実行時の既定フォルダはこの配下に制限されます。
 - `DISCORD_BOT_TOKEN`
   自分の Discord Bot Token です。絶対に GitHub に上げないでください。
 - `DISCORD_ALLOWED_GUILD_IDS`
@@ -286,13 +289,25 @@ npm run tauri:dev
 
 ### 手順 9. 代替: ブラウザから起動する
 
-次を実行します。
+サーバーだけ起動するなら次を実行します。
 
 ```powershell
 npm run start
 ```
 
-その後、ブラウザで次を開きます。
+ブラウザまでまとめて開くなら、次の補助スクリプトも使えます。
+
+```powershell
+.\launch-browser.ps1
+```
+
+または:
+
+```powershell
+.\launch-browser.cmd
+```
+
+手動で開く場合は、ブラウザで次を開きます。
 
 ```text
 http://127.0.0.1:3087
@@ -317,13 +332,15 @@ npm run tauri:build
 - セッションカードをクリックして名前変更
 - Discord Channel カードをクリックしてチャンネル紐付け
 - Model / Reasoning / Fast mode の切り替え
+- `Select Folder` でセッションごとの working directory 切り替え
 - メッセージ送信
 - ファイル追加
 - drag & drop / paste での添付追加
 - 実行中停止
 - `Restore Chat` による DB からの会話再取得と stale session 復旧
-- `Open Developer Console` / `Open Formatted Console`
-  - `CODEX_DEVELOPER_MODE=true` のとき利用可能
+- `Open Developer Console`
+- `Schedules` 画面で cron スケジュールの追加 / 編集 / 停止 / 削除
+- スケジュールごとの送信先を「既存セッション」または「新規セッション作成」から選択
 - セッション削除
 
 ### Discord コマンド
@@ -380,7 +397,7 @@ npm run tauri:build
 - `data/uploads/`
   添付ファイル
 - `data/logs/`
-  developer console 用の raw / formatted log
+  developer console 用ログ
 - `.env`
   Bot Token や設定値
 

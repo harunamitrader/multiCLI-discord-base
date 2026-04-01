@@ -4,11 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#eef1f5" />
-    <meta name="app-build-version" content="0.1.23" />
-    <title>Codex Discord Connected Display</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=0.1.23" />
-    <link rel="icon" href="/icon.svg?v=0.1.23" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=0.1.23" />
+    <meta name="app-build-version" content="0.1.65" />
+    <title>CoDiCoDi</title>
+    <link rel="manifest" href="/manifest.webmanifest?v=0.1.65" />
+    <link rel="icon" href="/icon.svg?v=0.1.65" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css?v=0.1.65" />
   </head>
   <body>
     <div class="shell">
@@ -24,27 +24,43 @@
         <button id="install-app-button" class="outline-button install-app-button" type="button" hidden>
           Install App
         </button>
-        <button id="new-session-button" class="primary-button">New Session</button>
+        <div class="sidebar-nav">
+          <button id="show-chat-button" class="outline-button" type="button">AI Chat</button>
+          <button id="show-schedules-button" class="outline-button" type="button">Schedules</button>
+          <button id="show-settings-button" class="outline-button" type="button">Settings</button>
+        </div>
         <p id="session-count" class="sidebar-note">0 sessions</p>
+        <button id="new-session-button" class="primary-button">New Session</button>
         <div id="session-list" class="session-list"></div>
       </aside>
 
       <main class="main-panel">
-        <div class="main-scroll-area">
-          <div class="top-scroll-area">
-          <section class="session-top-grid">
+        <header id="main-session-header" class="main-session-header">
+          <h2 id="main-session-heading">No session selected</h2>
+        </header>
+
+        <div class="main-view-stack">
+          <section id="chat-view" class="main-view chat-view">
+            <section class="conversation-shell">
+              <section id="chat-log" class="chat-log"></section>
+            </section>
+          </section>
+
+          <section id="settings-view" class="main-view settings-view">
+            <div class="top-scroll-area">
+              <section class="session-top-grid">
             <article
               id="session-card"
               class="meta-card meta-card-button session-summary-card"
               role="button"
               tabindex="0"
             >
-              <span class="eyebrow">Active Session</span>
+              <span id="session-card-eyebrow" class="eyebrow">Active Session</span>
               <h2 id="session-title">No session selected</h2>
               <p id="session-subtitle" class="panel-subtitle">
                 Select a session from the list or create a new one to begin.
               </p>
-              <small class="meta-card-hint">Click to rename</small>
+              <small id="session-card-hint" class="meta-card-hint">Click to rename</small>
             </article>
             <article
               id="discord-channel-card"
@@ -52,9 +68,9 @@
               role="button"
               tabindex="0"
             >
-              <span class="meta-label">Discord Channel</span>
+              <span id="discord-card-label" class="meta-label">Discord Channel</span>
               <code id="discord-id-value">Not linked</code>
-              <small class="meta-card-hint">Click to set</small>
+              <small id="discord-card-hint" class="meta-card-hint">Click to set</small>
             </article>
             <aside class="session-side-panel">
               <div class="session-action-card">
@@ -95,21 +111,111 @@
                 <button id="developer-console-button" class="outline-button developer-console-button" type="button">
                   Open Developer Console
                 </button>
-                <button
-                  id="developer-console-formatted-button"
-                  class="outline-button developer-console-button"
-                  type="button"
-                >
-                  Open Formatted Console
-                </button>
               </article>
+            </div>
+
+            <article class="settings-card workdir-card">
+              <div class="setting-group">
+                <label>Working Directory</label>
+                <code id="workdir-value" class="workdir-code">Not set</code>
+                <small id="workdir-base-note" class="panel-note">Base workdir: unknown</small>
+                <div class="workdir-actions">
+                  <button id="browse-workdir-button" class="outline-button workdir-button" type="button">
+                    Browse...
+                  </button>
+                  <button id="change-workdir-button" class="outline-button workdir-button" type="button">
+                    Choose from List
+                  </button>
+                </div>
+              </div>
+            </article>
+          </section>
             </div>
           </section>
 
-          </div>
+          <section id="schedule-view" class="main-view schedule-view" hidden>
+          <section class="schedule-create-card">
+            <div class="schedule-list-header">
+              <div>
+                <span class="eyebrow">Schedule作成</span>
+                <h3>Schedule作成</h3>
+              </div>
+            </div>
+            <form id="schedule-form" class="schedule-form">
+              <div class="schedule-form-grid">
+                <label class="schedule-field">
+                  <span>Name</span>
+                  <input
+                    id="schedule-name-input"
+                    name="name"
+                    type="text"
+                    placeholder="morning-report"
+                    autocomplete="off"
+                    required
+                  />
+                </label>
+                <label class="schedule-field">
+                  <span>Cron</span>
+                  <input
+                    id="schedule-cron-input"
+                    name="cron"
+                    type="text"
+                    placeholder="0 9 * * *"
+                    autocomplete="off"
+                    required
+                  />
+                </label>
+                <label class="schedule-field">
+                  <span>Target</span>
+                  <div id="schedule-target-summary" class="schedule-target-summary">No target selected</div>
+                  <small id="schedule-target-note" class="panel-note">Select a card from the session list.</small>
+                </label>
+                <label class="schedule-field">
+                  <span>Timezone</span>
+                  <input
+                    id="schedule-timezone-input"
+                    name="timezone"
+                    type="text"
+                    value="Asia/Tokyo"
+                    autocomplete="off"
+                  />
+                </label>
+              </div>
 
-          <section class="conversation-shell">
-            <section id="chat-log" class="chat-log"></section>
+              <div id="schedule-cron-presets" class="cron-presets-panel"></div>
+
+              <div class="schedule-cron-translation">
+                <span class="eyebrow">日本語翻訳</span>
+                <strong id="schedule-cron-description">cron を入力すると日本語で表示します。</strong>
+              </div>
+
+              <label class="schedule-field schedule-field-full">
+                <span>Prompt</span>
+                <textarea
+                  id="schedule-prompt-input"
+                  name="prompt"
+                  rows="4"
+                  placeholder="What should this schedule ask Codex to do?"
+                  required
+                ></textarea>
+              </label>
+
+              <div class="schedule-form-actions">
+                <button class="primary-button" type="submit">Create Schedule</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="schedule-list-section">
+            <div class="schedule-list-header">
+              <div>
+                <span class="eyebrow">Job一覧</span>
+                <h3>Job一覧</h3>
+              </div>
+              <p id="schedule-count" class="panel-note">0 schedules</p>
+            </div>
+            <div id="schedule-list" class="schedule-list"></div>
+          </section>
           </section>
         </div>
 
@@ -121,18 +227,28 @@
                 rows="3"
                 placeholder="Type here. This will be queued into the shared Codex session."
               ></textarea>
-              <div class="composer-toolbar">
-                <input id="attachment-input" type="file" multiple hidden />
-                <button id="attachment-button" class="outline-button composer-attach-button" type="button">
-                  Add files
-                </button>
+              <div class="composer-footer" hidden>
+                <div class="composer-footer-left">
+                  <div id="composer-feedback" class="composer-feedback" hidden></div>
+                  <div id="pending-attachment-list" class="pending-attachment-list" hidden></div>
+                </div>
               </div>
-              <div id="pending-attachment-list" class="pending-attachment-list" hidden></div>
-              <div id="composer-feedback" class="composer-feedback" hidden></div>
             </div>
             <div class="composer-actions">
-              <button id="stop-session-button" class="stop-button" type="button">Stop</button>
+              <button
+                id="enter-send-toggle-button"
+                class="outline-button composer-mode-button"
+                type="button"
+                aria-pressed="false"
+              >
+                Enter Send Off
+              </button>
+              <input id="attachment-input" type="file" multiple hidden />
+              <button id="attachment-button" class="outline-button composer-attach-button" type="button">
+                Add files
+              </button>
               <button class="primary-button" type="submit">Send</button>
+              <button id="stop-session-button" class="stop-button composer-stop-button" type="button">Stop</button>
             </div>
           </form>
         </section>
@@ -152,6 +268,22 @@
       </form>
     </dialog>
 
-    <script type="module" src="/app.js?v=0.1.23"></script>
+    <dialog id="workdir-picker-dialog" class="channel-picker-dialog">
+      <form method="dialog" class="channel-picker-shell">
+        <div class="channel-picker-header">
+          <div>
+            <span class="eyebrow">Working Directory</span>
+            <h3>Select Folder</h3>
+          </div>
+          <button id="workdir-picker-close" class="outline-button" type="submit">Close</button>
+        </div>
+        <p class="panel-note">
+          Only folders under the configured base workdir can be selected.
+        </p>
+        <div id="workdir-picker-list" class="channel-picker-list"></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js?v=0.1.65"></script>
   </body>
   </html>

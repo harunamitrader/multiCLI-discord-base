@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "codex-discord-connected-display-tauri"
-version = "0.1.23"
+version = "0.1.41"
 dependencies = [
  "log",
  "serde",

@@ -209,6 +209,18 @@ function formatLocalInputMessage(payload) {
   return lines.join("\n");
 }
 
+function formatScheduledInputMessage(payload) {
+  const scheduleName = String(payload.scheduleName || "unnamed-job").trim() || "unnamed-job";
+  const prompt = String(payload.schedulePrompt || payload.text || "").trim();
+  const lines = [`⏰ ジョブ「${scheduleName}」を実行`];
+
+  if (prompt) {
+    lines.push(`>>> ${prompt}`);
+  }
+
+  return lines.join("\n");
+}
+
 export class DiscordAdapter {
   constructor({ bridge, bus, config, attachments }) {
     this.bridge = bridge;
@@ -1097,6 +1109,12 @@ export class DiscordAdapter {
 
     if (event.eventType === "message.user" && event.source === "ui") {
       await channel.send(formatLocalInputMessage(event.payload));
+      this.markProgressTrackerHasTrailingMessages(session.id);
+      return;
+    }
+
+    if (event.eventType === "message.user" && event.source === "schedule") {
+      await channel.send(formatScheduledInputMessage(event.payload));
       this.markProgressTrackerHasTrailingMessages(session.id);
       return;
     }

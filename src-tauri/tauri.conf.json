@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Codex Discord Connected Display",
-  "version": "0.1.23",
+  "productName": "CoDiCoDi",
+  "version": "0.1.46",
   "identifier": "io.github.harunamitrader.codicodi",
   "build": {
     "frontendDist": "../ui",
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Codex Discord Connected Display",
+        "title": "CoDiCoDi",
         "width": 1440,
         "height": 960,
         "minWidth": 800,
@@ -23,7 +23,7 @@
       },
       {
         "label": "splash",
-        "title": "Starting Codex Discord Connected Display",
+        "title": "CoDiCoDi",
         "url": "splash.html",
         "width": 420,
         "height": 300,

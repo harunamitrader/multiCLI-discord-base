@@ -79,7 +79,7 @@ function buildRequestUrl(request) {
   return new URL(request.url || "/", "http://localhost");
 }
 
-export function createHttpServer({ config, bridge, bus, discord, attachments }) {
+export function createHttpServer({ config, bridge, bus, discord, attachments, scheduler }) {
   return http.createServer(async (request, response) => {
     try {
       const url = buildRequestUrl(request);
@@ -96,9 +96,31 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
         return;
       }
 
-      if (pathname === "/api/developer/codex-console/open" && request.method === "POST") {
+      if (pathname === "/api/workdirs" && request.method === "GET") {
+        sendJson(response, 200, bridge.listSelectableWorkdirs());
+        return;
+      }
+
+      if (pathname === "/api/workdirs/browse" && request.method === "POST") {
         const body = await readJsonBody(request);
-        const result = bridge.openDeveloperConsole(body.mode);
+        const sessionId = body.sessionId?.trim() || "";
+        if (!sessionId) {
+          sendJson(response, 400, { error: "sessionId is required" });
+          return;
+        }
+
+        if (!bridge.getSession(sessionId)) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        const result = await bridge.browseForSessionWorkdir(sessionId);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/developer/codex-console/open" && request.method === "POST") {
+        const result = bridge.openDeveloperConsole();
         const statusCode = result.ok ? 200 : 400;
         sendJson(response, statusCode, result);
         return;
@@ -132,6 +154,95 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
         return;
       }
 
+      if (pathname === "/api/schedules" && request.method === "GET") {
+        sendJson(response, 200, {
+          schedules: scheduler.listJobs(),
+        });
+        return;
+      }
+
+      if (pathname === "/api/cron/describe" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        if (!body.cron?.trim()) {
+          sendJson(response, 400, { error: "cron is required" });
+          return;
+        }
+
+        sendJson(response, 200, scheduler.describeCron(body.cron));
+        return;
+      }
+
+      if (pathname === "/api/schedule-defaults" && request.method === "GET") {
+        sendJson(response, 200, bridge.getScheduleDefaults());
+        return;
+      }
+
+      if (pathname === "/api/schedule-defaults" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const defaults = bridge.updateScheduleDefaults({
+          model: body.model?.trim() || undefined,
+          reasoningEffort: body.reasoningEffort?.trim() || undefined,
+          profile: body.profile?.trim() || undefined,
+          workdir: body.workdir?.trim() || undefined,
+          fastMode: body.fastMode == null ? undefined : Boolean(body.fastMode),
+        });
+        sendJson(response, 200, defaults);
+        return;
+      }
+
+      if (pathname === "/api/schedule-defaults/workdir/browse" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await bridge.browseForScheduleDefaultsWorkdir(
+          body.initialPath?.trim() || undefined,
+        );
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/schedules" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const schedule = await scheduler.addJob({
+          name: body.name,
+          cron: body.cron,
+          prompt: body.prompt,
+          target: body.target,
+          timezone: body.timezone,
+          active: body.active,
+        });
+        sendJson(response, 201, schedule);
+        return;
+      }
+
+      const scheduleMatch = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+      if (scheduleMatch && request.method === "PATCH") {
+        const body = await readJsonBody(request);
+        const schedule = await scheduler.updateJob(decodeURIComponent(scheduleMatch[1]), {
+          cron: body.cron,
+          prompt: body.prompt,
+          target: body.target,
+          timezone: body.timezone,
+          active: body.active,
+        });
+        if (!schedule) {
+          sendJson(response, 404, { error: "Schedule not found" });
+          return;
+        }
+
+        sendJson(response, 200, schedule);
+        return;
+      }
+
+      if (scheduleMatch && request.method === "DELETE") {
+        const deleted = await scheduler.removeJob(decodeURIComponent(scheduleMatch[1]));
+        if (!deleted) {
+          sendJson(response, 404, { error: "Schedule not found" });
+          return;
+        }
+
+        sendJson(response, 200, { deleted: true });
+        return;
+      }
+
       if (pathname === "/api/sessions" && request.method === "POST") {
         const body = await readJsonBody(request);
         const session = bridge.createSession({
@@ -141,6 +252,7 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
           model: body.model?.trim() || undefined,
           reasoningEffort: body.reasoningEffort?.trim() || undefined,
           profile: body.profile?.trim() || undefined,
+          workdir: body.workdir?.trim() || undefined,
           fastMode: body.fastMode == null ? undefined : Boolean(body.fastMode),
         });
         sendJson(response, 201, session);
@@ -160,13 +272,26 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
       }
 
       if (sessionMatch && request.method === "DELETE") {
-        const session = bridge.deleteSession(sessionMatch[1]);
+        const session = bridge.getSession(sessionMatch[1]);
         if (!session) {
           sendJson(response, 404, { error: "Session not found" });
           return;
         }
 
-        sendJson(response, 200, { deleted: true, session });
+        const dependentSchedules = scheduler.listJobsReferencingSession(session.id, session.title);
+        if (dependentSchedules.length > 0) {
+          sendJson(response, 409, {
+            error: `This session is used by schedules: ${dependentSchedules
+              .map((schedule) => schedule.name)
+              .join(", ")}`,
+            schedules: dependentSchedules.map((schedule) => schedule.name),
+          });
+          return;
+        }
+
+        const deletedSession = bridge.deleteSession(sessionMatch[1]);
+
+        sendJson(response, 200, { deleted: true, session: deletedSession });
         return;
       }
 
@@ -221,14 +346,9 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
       const bindMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/discord-bind$/);
       if (bindMatch && request.method === "POST") {
         const body = await readJsonBody(request);
-        if (!body.channelId?.trim()) {
-          sendJson(response, 400, { error: "channelId is required" });
-          return;
-        }
-
         const session = bridge.bindDiscordChannelWithName(
           bindMatch[1],
-          body.channelId.trim(),
+          body.channelId?.trim() || null,
           body.channelName?.trim() || null,
         );
         if (!session) {
@@ -247,6 +367,7 @@ export function createHttpServer({ config, bridge, bus, discord, attachments }) 
           model: body.model?.trim() || undefined,
           reasoningEffort: body.reasoningEffort?.trim() || undefined,
           profile: body.profile?.trim() || undefined,
+          workdir: body.workdir?.trim() || undefined,
           fastMode:
             body.fastMode == null ? undefined : Boolean(body.fastMode),
         });

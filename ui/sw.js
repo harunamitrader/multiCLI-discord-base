@@ -1,16 +1,20 @@
-const CACHE_NAME = "codex-discord-connected-display-shell-v24";
+const CACHE_NAME = "codex-discord-connected-display-shell-v65";
 const SHELL_ASSETS = [
   "/",
-  "/index.html?v=0.1.23",
-  "/styles.css?v=0.1.23",
-  "/app.js?v=0.1.23",
-  "/manifest.webmanifest?v=0.1.23",
-  "/icon.svg?v=0.1.23",
-  "/icon-maskable.svg?v=0.1.23",
-  "/icon-192.png?v=0.1.23",
-  "/icon-512.png?v=0.1.23",
-  "/icon-maskable-512.png?v=0.1.23",
+  "/index.html?v=0.1.65",
+  "/styles.css?v=0.1.65",
+  "/app.js?v=0.1.65",
+  "/manifest.webmanifest?v=0.1.65",
+  "/icon.svg?v=0.1.65",
+  "/icon-maskable.svg?v=0.1.65",
+  "/icon-192.png?v=0.1.65",
+  "/icon-512.png?v=0.1.65",
+  "/icon-maskable-512.png?v=0.1.65",
 ];
+
+function isNavigationRequest(requestUrl) {
+  return requestUrl.pathname === "/" || requestUrl.pathname === "/index.html";
+}
 
 function isCacheableRequest(requestUrl) {
   return (
@@ -48,6 +52,25 @@ self.addEventListener("fetch", (event) => {
 
   const requestUrl = new URL(event.request.url);
   if (!isCacheableRequest(requestUrl)) {
+    return;
+  }
+
+  if (isNavigationRequest(requestUrl)) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkResponse) => {
+          if (!networkResponse || networkResponse.status !== 200) {
+            return networkResponse;
+          }
+
+          const responseClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseClone);
+          });
+          return networkResponse;
+        })
+        .catch(() => caches.match(event.request)),
+    );
     return;
   }
 

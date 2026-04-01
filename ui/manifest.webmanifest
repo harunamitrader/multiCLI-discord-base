@@ -1,5 +1,5 @@
 {
-  "name": "Codex Discord Connected Display",
+  "name": "CoDiCoDi",
   "short_name": "CoDiCoDi",
   "description": "A shared workspace for driving the same Codex session from the local UI and Discord.",
   "start_url": "/",

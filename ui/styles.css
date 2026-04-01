@@ -155,6 +155,18 @@ button {
   width: 100%;
 }
 
+.sidebar-nav {
+  display: grid;
+  gap: 8px;
+}
+
+#show-chat-button,
+#show-schedules-button,
+#show-settings-button,
+#new-session-button {
+  width: 100%;
+}
+
 .secondary-button {
   border: 1px solid #dc2626;
   padding: 8px 12px;
@@ -183,6 +195,12 @@ button {
   transform: translateY(-1px);
   background: #f8fafc;
   border-color: #cfd7e3;
+}
+
+.outline-button.active {
+  border-color: #b6c6de;
+  background: #e7eef8;
+  color: #163f77;
 }
 
 .secondary-button:hover {
@@ -285,6 +303,20 @@ button {
   display: block;
 }
 
+.session-card-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-card-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .session-card strong {
   line-height: 1.35;
   font-size: 12px;
@@ -297,9 +329,53 @@ button {
   font-size: 11px;
 }
 
+.session-schedule-indicator {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.session-schedule-indicator-active {
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.session-schedule-indicator-paused {
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.session-prompt-count-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.session-card.active .session-prompt-count-badge {
+  background: #d6e3f6;
+  color: #163f77;
+}
+
 .main-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
   min-width: 0;
   min-height: 0;
@@ -307,13 +383,54 @@ button {
   padding: 20px 22px;
 }
 
-.main-scroll-area {
+.main-session-header {
+  display: flex;
+  align-items: center;
+  margin: -20px -22px 0;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 22px;
+  border-top: 1px solid #e8d2c1;
+  border-bottom: 1px solid #e8d2c1;
+  background: linear-gradient(180deg, #fff0e5 0%, #f7e0cf 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.main-session-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  color: #6e4932;
+  overflow-wrap: anywhere;
+}
+
+.main-view-stack {
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+.main-view {
+  display: none;
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  display: flex;
-  flex-direction: column;
   gap: 14px;
   padding-right: 4px;
+}
+
+body[data-view="chat"] .chat-view,
+body[data-view="settings"] .settings-view,
+body[data-view="schedules"] .schedule-view {
+  display: flex;
+  flex-direction: column;
+}
+
+body[data-view="settings"] .composer-shell,
+body[data-view="schedules"] .composer-shell {
+  display: none;
 }
 
 .top-scroll-area {
@@ -493,6 +610,46 @@ button {
 
 .session-tools-card .outline-button {
   width: 100%;
+}
+
+.workdir-card {
+  justify-self: start;
+  width: min(100%, 560px);
+  padding: 10px 12px;
+}
+
+.workdir-card .setting-group {
+  gap: 6px;
+}
+
+.workdir-code {
+  display: block;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  color: #334155;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.workdir-button {
+  width: fit-content;
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 10px;
+}
+
+.workdir-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workdir-card .panel-note {
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .channel-picker-dialog {
@@ -697,6 +854,372 @@ button {
   border-color: rgba(120, 145, 194, 0.55);
 }
 
+.schedule-view-header,
+.schedule-list-header,
+.schedule-form-actions,
+.schedule-card-header,
+.schedule-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.schedule-card-header {
+  justify-content: space-between;
+}
+
+.schedule-card-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.schedule-create-card,
+.schedule-list-section,
+.schedule-card {
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.schedule-create-card,
+.schedule-list-section {
+  padding: 18px 20px;
+}
+
+.schedule-create-card {
+  border-color: #cfe5d4;
+  background: linear-gradient(180deg, rgba(244, 252, 246, 0.98) 0%, rgba(236, 249, 240, 0.96) 100%);
+}
+
+.schedule-list-section {
+  border-color: #efd7bf;
+  background: linear-gradient(180deg, rgba(255, 248, 239, 0.98) 0%, rgba(255, 243, 230, 0.96) 100%);
+}
+
+.schedule-form,
+.schedule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.schedule-form-grid,
+.schedule-card-grid,
+.schedule-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-field span,
+.schedule-checkbox span,
+.schedule-meta-item span {
+  color: #465163;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.schedule-field-full {
+  width: 100%;
+}
+
+.schedule-field input,
+.schedule-field textarea,
+.schedule-target-summary {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.schedule-field input {
+  padding: 12px 14px;
+}
+
+.schedule-target-summary {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 12px 14px;
+  font-weight: 600;
+}
+
+.schedule-field textarea {
+  min-height: 110px;
+  padding: 12px 14px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.cron-presets-panel {
+  padding: 10px 12px 12px;
+  border: 1px solid #d8deeb;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f6fc 100%);
+}
+
+.cron-presets-panel-inline {
+  padding-top: 10px;
+}
+
+.cron-presets-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.cron-presets-header span {
+  color: #465163;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cron-presets-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cron-preset-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #cfd8ea;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  color: #334155;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.cron-preset-button strong,
+.cron-preset-button span {
+  display: inline-block;
+  line-height: 1;
+}
+
+.cron-preset-button strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: inherit;
+}
+
+.cron-preset-button span {
+  font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+  font-size: 10px;
+  color: #64748b;
+}
+
+.cron-preset-button:hover {
+  transform: translateY(-1px);
+  border-color: #9bb3da;
+  background: #ffffff;
+}
+
+.cron-preset-button.active {
+  border-color: #2d66c3;
+  background: #155fc0;
+  color: #ffffff;
+}
+
+.cron-preset-button.active span {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.schedule-cron-translation {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #d8deeb;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f6fc 100%);
+}
+
+.schedule-cron-translation strong {
+  font-size: 14px;
+  line-height: 1.6;
+  letter-spacing: 0;
+  font-weight: 700;
+}
+
+.schedule-cron-translation strong.error {
+  color: #b91c1c;
+}
+
+.schedule-card .schedule-cron-translation strong {
+  font-size: 14px;
+}
+
+.schedule-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-checkbox input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.schedule-checkbox-inline {
+  align-self: end;
+  min-height: 46px;
+}
+
+.schedule-action-button {
+  min-width: 92px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+}
+
+.schedule-action-save {
+  border-color: #2967c6;
+  background: #2f74da;
+  color: #ffffff;
+}
+
+.schedule-action-save:hover {
+  background: #255fb3;
+  border-color: #1f529c;
+  color: #ffffff;
+}
+
+.schedule-toggle-running {
+  border-color: #b9ddc1;
+  background: #eaf8ee;
+  color: #24613b;
+}
+
+.schedule-toggle-running:hover {
+  background: #dcf2e3;
+  border-color: #a6d2b1;
+  color: #1d4f2f;
+}
+
+.schedule-toggle-paused {
+  border-color: #efc5c5;
+  background: #fef0f0;
+  color: #a33b3b;
+}
+
+.schedule-toggle-paused:hover {
+  background: #fce2e2;
+  border-color: #e8b5b5;
+  color: #922f2f;
+}
+
+.schedule-list-header {
+  margin-bottom: 14px;
+  align-items: flex-end;
+}
+
+.schedule-list-header h3,
+.schedule-card-header h4 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.schedule-view-header h2 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+#schedule-form .primary-button {
+  border-color: #2c6f2c;
+  background: #348434;
+}
+
+#schedule-form .primary-button:hover {
+  background: #2c6f2c;
+  border-color: #245c24;
+  box-shadow: 0 8px 18px rgba(52, 132, 52, 0.22);
+}
+
+.schedule-card {
+  padding: 18px 20px;
+}
+
+.schedule-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.schedule-status-pill[data-status="running"] {
+  border-color: #f3dfc0;
+  background: #fff6ea;
+  color: #7c3f00;
+}
+
+.schedule-status-pill[data-status="completed"] {
+  border-color: #cce8d7;
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.schedule-status-pill[data-status="error"] {
+  border-color: #f3c7c7;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.schedule-status-pill[data-status="paused"] {
+  border-color: #d7dce3;
+  background: #f8fafc;
+  color: #64748b;
+}
+
+.schedule-meta-item {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-muted);
+}
+
+.schedule-meta-item strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.schedule-error {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 16px;
+  background: #fff1f2;
+  color: #b91c1c;
+  line-height: 1.6;
+}
+
 .chat-log {
   display: flex;
   flex-direction: column;
@@ -714,6 +1237,9 @@ button {
 
 .composer-shell {
   padding: 18px 22px 14px;
+  height: 198px;
+  overflow: auto;
+  scrollbar-gutter: stable;
   border-radius: 22px;
   background:
     linear-gradient(
@@ -856,6 +1382,11 @@ button {
 
 .message-source-ui {
   background: #e07b2d;
+  color: #ffffff;
+}
+
+.message-source-schedule {
+  background: #0f766e;
   color: #ffffff;
 }
 
@@ -1022,9 +1553,10 @@ button {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) 108px;
+  gap: 14px;
+  align-items: stretch;
+  min-height: 100%;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -1058,25 +1590,63 @@ button {
 }
 
 .composer-inputs {
-  display: grid;
-  gap: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  align-self: stretch;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow:
+    0 10px 24px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65);
 }
 
-.composer-toolbar {
+.composer-footer {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(120, 145, 194, 0.24);
+}
+
+.composer-footer-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .composer-attach-button {
-  padding: 8px 12px;
+  padding: 8px 14px;
   border-radius: 999px;
   font-size: 11px;
+  font-weight: 600;
+  color: #224680;
+  border-color: rgba(86, 118, 187, 0.42);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(242, 247, 255, 0.92) 100%);
+  box-shadow: 0 8px 18px rgba(91, 122, 186, 0.12);
+}
+
+.composer-attach-button:hover {
+  color: #17335f;
+  border-color: rgba(72, 105, 180, 0.58);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(231, 240, 255, 0.98) 100%);
 }
 
 .pending-attachment-list {
   display: grid;
   gap: 8px;
+  justify-items: start;
+  align-content: center;
+  min-width: 0;
+  width: 100%;
 }
 
 .composer-feedback {
@@ -1127,21 +1697,39 @@ button {
 
 .composer-actions {
   display: flex;
+  flex-direction: column;
   align-items: stretch;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  justify-content: flex-start;
   gap: 10px;
+  flex: 0 0 auto;
+  z-index: 1;
 }
 
 .composer textarea {
   resize: vertical;
-  min-height: 64px;
-  max-height: 180px;
-  padding: 16px 18px;
+  flex: 1 0 auto;
+  min-height: calc(1.6em * 4);
+  height: auto;
+  max-height: none;
+  overflow: auto;
+  padding: 0;
   line-height: 1.6;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .composer .primary-button {
-  min-width: 92px;
-  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
   border-color: #2c6f2c;
   background: #348434;
   color: #ffffff;
@@ -1158,8 +1746,48 @@ button {
 }
 
 .composer .stop-button {
-  min-width: 92px;
-  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+}
+
+.composer .composer-stop-button {
+  height: 32px;
+}
+
+.composer .composer-mode-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 22px;
+  padding: 2px 5px;
+  font-size: 10px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.composer .composer-mode-button[aria-pressed="true"] {
+  color: #ffffff;
+  border-color: #315f9f;
+  background: linear-gradient(180deg, #5b7aba 0%, #4868a8 100%);
+  box-shadow: 0 8px 18px rgba(72, 104, 168, 0.22);
+}
+
+.composer .composer-attach-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 2px 10px;
+  font-size: 11px;
+  box-shadow: 0 4px 10px rgba(91, 122, 186, 0.1);
 }
 
 .empty-state {
@@ -1199,6 +1827,12 @@ button {
   .message-bubble {
     max-width: 82%;
   }
+
+  .schedule-form-grid,
+  .schedule-card-grid,
+  .schedule-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 799px) {
@@ -1216,6 +1850,15 @@ button {
     padding: 16px;
   }
 
+  .main-session-header {
+    margin: -16px -16px 0;
+    padding: 8px 16px;
+  }
+
+  .main-session-header h2 {
+    font-size: 16px;
+  }
+
   .panel-header {
     align-items: flex-start;
     flex-direction: column;
@@ -1226,20 +1869,58 @@ button {
   }
 
   .bind-row,
+  .bind-row,
   .composer {
     grid-template-columns: 1fr;
   }
 
+  .composer-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .composer-shell {
+    height: 218px;
+  }
+
+  .schedule-view-header,
+  .schedule-list-header,
+  .schedule-form-actions,
+  .schedule-card-header,
+  .schedule-card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .schedule-card-header-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .schedule-form-grid,
+  .schedule-card-grid,
+  .schedule-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-footer-left {
+    width: 100%;
+  }
+
+  .pending-attachment-list {
+    width: 100%;
+    justify-items: stretch;
+  }
+
   .composer-actions {
     width: 100%;
-    flex-direction: column;
+    flex-direction: row;
   }
 
-  .composer .primary-button {
-    width: 100%;
-  }
-
+  .composer .composer-attach-button,
+  .composer .primary-button,
   .composer .stop-button {
+    flex: 1 1 120px;
     width: 100%;
   }
 

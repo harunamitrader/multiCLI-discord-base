@@ -1,8 +1,30 @@
+import fs from "node:fs";
+import path from "node:path";
+import { browseForDirectory } from "./workdir-picker.js";
+
 function isCancelledError(error) {
   return Boolean(error?.cancelled || error?.name === "CodexRunCancelledError");
 }
 
 const RECOVERABLE_SESSION_STATUSES = new Set(["queued", "running", "waiting_codex"]);
+const IGNORED_WORKDIR_NAMES = new Set([
+  ".git",
+  "node_modules",
+  "data",
+  "dist",
+  "build",
+  "coverage",
+  "target",
+]);
+
+function normalizeSessionReference(value) {
+  if (value == null) {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  return normalized || null;
+}
 
 function formatSessionTimestamp(value = new Date()) {
   return new Intl.DateTimeFormat("sv-SE", {
@@ -15,6 +37,28 @@ function formatSessionTimestamp(value = new Date()) {
   })
     .format(value)
     .replace(" ", " ");
+}
+
+function readJsonFileSafe(filePath, fallback = null) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return fallback;
+    }
+
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, payload) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function formatScheduleSpawnSessionTitle(scheduleName) {
+  const normalizedName = String(scheduleName || "").trim() || "schedule";
+  return `Schedule ${normalizedName} ${formatSessionTimestamp()}`;
 }
 
 function splitAttachments(attachments = []) {
@@ -61,6 +105,20 @@ function buildAssistantPayload(job, text, isFinal) {
   };
 }
 
+function isSubPath(parentPath, childPath) {
+  const relative = path.relative(parentPath, childPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function formatRelativeWorkdir(basePath, targetPath) {
+  const relative = path.relative(basePath, targetPath);
+  if (!relative) {
+    return ".";
+  }
+
+  return relative.replaceAll("\\", "/");
+}
+
 export class BridgeService {
   constructor({ store, bus, codex, config, attachments }) {
     this.store = store;
@@ -76,6 +134,53 @@ export class BridgeService {
     return this.store.listSessions();
   }
 
+  getScheduleDefaults() {
+    const persisted = readJsonFileSafe(this.config.scheduleDefaultsPath, {}) || {};
+    const baseDefaults = {
+      model: this.config.codexDefaults.model,
+      reasoningEffort: this.config.codexDefaults.reasoningEffort,
+      profile: this.config.codexDefaults.profile,
+      serviceTier: this.config.codexDefaults.serviceTier,
+      fastMode: this.config.codexDefaults.serviceTier === "fast",
+    };
+    const settings = this.normalizeSessionSettings(persisted, baseDefaults);
+
+    let workdir = this.config.codexDefaults.workdir;
+    try {
+      workdir = this.normalizeSessionWorkdir(persisted.workdir, null);
+    } catch {
+      workdir = this.normalizeSessionWorkdir(this.config.codexDefaults.workdir, null);
+    }
+
+    return {
+      ...settings,
+      workdir,
+    };
+  }
+
+  updateScheduleDefaults(patch) {
+    const current = this.getScheduleDefaults();
+    const settings = this.normalizeSessionSettings(patch, current);
+    const workdir = this.normalizeSessionWorkdir(
+      patch.workdir == null ? current.workdir : patch.workdir,
+      null,
+    );
+    const next = {
+      ...settings,
+      workdir,
+    };
+
+    writeJsonFile(this.config.scheduleDefaultsPath, {
+      model: next.model,
+      reasoningEffort: next.reasoningEffort,
+      profile: next.profile,
+      serviceTier: next.serviceTier,
+      workdir: next.workdir,
+    });
+
+    return next;
+  }
+
   getRuntimeInfo() {
     return {
       app: {
@@ -83,6 +188,7 @@ export class BridgeService {
       },
       codexVersion: this.config.codexVersion,
       workdir: this.config.codexWorkdir,
+      baseWorkdir: this.config.codexWorkdir,
       defaultProfile: this.config.codexDefaults.profile,
       availableModels: this.config.availableModels,
       defaults: {
@@ -91,13 +197,11 @@ export class BridgeService {
         fastMode: this.config.codexDefaults.serviceTier === "fast",
         serviceTier: this.config.codexDefaults.serviceTier,
         profile: this.config.codexDefaults.profile,
+        workdir: this.config.codexDefaults.workdir,
       },
       attachments: {
         maxAttachmentsPerMessage: this.config.maxAttachmentsPerMessage,
         maxAttachmentBytes: this.config.maxAttachmentBytes,
-      },
-      developer: {
-        enabled: this.config.codexDeveloperMode,
       },
     };
   }
@@ -120,6 +224,44 @@ export class BridgeService {
 
   findSessionByDiscordChannel(channelId) {
     return this.store.findSessionByDiscordChannel(channelId);
+  }
+
+  findSessionByReference(sessionReference) {
+    const normalizedReference = normalizeSessionReference(sessionReference);
+    if (!normalizedReference) {
+      return null;
+    }
+
+    const directMatch = this.getSession(normalizedReference);
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const normalizedLowercase = normalizedReference.toLowerCase();
+    return (
+      this.listSessions().find(
+        (session) => String(session.title || "").trim().toLowerCase() === normalizedLowercase,
+      ) || null
+    );
+  }
+
+  resolveScheduledSession(sessionReference = null) {
+    const normalizedReference = normalizeSessionReference(sessionReference);
+    if (normalizedReference) {
+      const matched = this.findSessionByReference(normalizedReference);
+      if (matched) {
+        return matched;
+      }
+
+      throw new Error(`Scheduled session not found: ${normalizedReference}`);
+    }
+
+    const fallback = this.listSessions()[0] || null;
+    if (!fallback) {
+      throw new Error("No available session for scheduled execution.");
+    }
+
+    return fallback;
   }
 
   getModelDefinition(modelSlug) {
@@ -169,6 +311,135 @@ export class BridgeService {
     };
   }
 
+  normalizeSessionWorkdir(inputWorkdir, currentSession = null) {
+    const fallbackWorkdir =
+      currentSession?.workdir ?? this.config.codexDefaults.workdir ?? this.config.codexWorkdir;
+    const requestedWorkdir =
+      inputWorkdir == null ? fallbackWorkdir : String(inputWorkdir).trim() || fallbackWorkdir;
+    const resolvedRequestedPath = path.resolve(requestedWorkdir);
+    if (!fs.existsSync(resolvedRequestedPath)) {
+      throw new Error(`Selected working directory was not found: ${resolvedRequestedPath}`);
+    }
+
+    const requestedStat = fs.statSync(resolvedRequestedPath);
+    if (!requestedStat.isDirectory()) {
+      throw new Error(`Selected working directory is not a directory: ${resolvedRequestedPath}`);
+    }
+
+    const baseRealPath = fs.realpathSync(this.config.codexWorkdir);
+    const requestedRealPath = fs.realpathSync(resolvedRequestedPath);
+    if (!isSubPath(baseRealPath, requestedRealPath)) {
+      throw new Error(
+        `Selected working directory must stay inside ${baseRealPath}. Received: ${requestedRealPath}`,
+      );
+    }
+
+    return requestedRealPath;
+  }
+
+  listSelectableWorkdirs() {
+    const baseRealPath = fs.realpathSync(this.config.codexWorkdir);
+    const seen = new Set([baseRealPath]);
+    const queue = [{ dirPath: baseRealPath, depth: 0 }];
+    const results = [];
+
+    while (queue.length > 0 && results.length < 200) {
+      const { dirPath, depth } = queue.shift();
+      const workspaceState = this.codex.getGitWorkspaceState(dirPath);
+      results.push({
+        path: dirPath,
+        relativePath: formatRelativeWorkdir(baseRealPath, dirPath),
+        label: formatRelativeWorkdir(baseRealPath, dirPath),
+        isGitRepo: workspaceState.ok,
+        gitRoot: workspaceState.ok ? workspaceState.root : null,
+      });
+
+      if (depth >= 3) {
+        continue;
+      }
+
+      let children = [];
+      try {
+        children = fs
+          .readdirSync(dirPath, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && !IGNORED_WORKDIR_NAMES.has(entry.name))
+          .sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
+      } catch {
+        continue;
+      }
+
+      for (const child of children) {
+        const childPath = path.join(dirPath, child.name);
+        let childRealPath;
+        try {
+          childRealPath = fs.realpathSync(childPath);
+        } catch {
+          continue;
+        }
+
+        if (!isSubPath(baseRealPath, childRealPath) || seen.has(childRealPath)) {
+          continue;
+        }
+
+        seen.add(childRealPath);
+        queue.push({
+          dirPath: childRealPath,
+          depth: depth + 1,
+        });
+      }
+    }
+
+    return {
+      baseWorkdir: baseRealPath,
+      workdirs: results,
+    };
+  }
+
+  async browseForSessionWorkdir(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const initialDirectory = session.workdir || this.config.codexWorkdir;
+    const selection = await browseForDirectory({
+      initialDirectory,
+      title: "Select a working directory inside the configured base folder",
+    });
+
+    if (selection?.cancelled) {
+      return {
+        cancelled: true,
+      };
+    }
+
+    return {
+      cancelled: false,
+      path: this.normalizeSessionWorkdir(selection.path, session),
+    };
+  }
+
+  async browseForScheduleDefaultsWorkdir(initialPath = null) {
+    const defaults = this.getScheduleDefaults();
+    const normalizedInitialPath = String(initialPath || "").trim();
+    const initialDirectory = normalizedInitialPath || defaults.workdir || this.config.codexWorkdir;
+    const selection = await browseForDirectory({
+      initialDirectory,
+      title: "Select a default working directory for spawned schedule sessions",
+    });
+
+    if (selection?.cancelled) {
+      return {
+        cancelled: true,
+      };
+    }
+
+    return {
+      cancelled: false,
+      path: this.normalizeSessionWorkdir(selection.path, null),
+    };
+  }
+
   resolveSessionTitle(title) {
     const normalizedTitle = title?.trim();
     if (
@@ -188,6 +459,7 @@ export class BridgeService {
     model,
     reasoningEffort,
     profile,
+    workdir,
     serviceTier,
     fastMode,
   }) {
@@ -201,6 +473,7 @@ export class BridgeService {
       serviceTier,
       fastMode,
     });
+    const normalizedWorkdir = this.normalizeSessionWorkdir(workdir, null);
     const session = this.store.createSession({
       title: this.resolveSessionTitle(title),
       discordChannelId,
@@ -208,6 +481,7 @@ export class BridgeService {
       model: settings.model,
       reasoningEffort: settings.reasoningEffort,
       profile: settings.profile,
+      workdir: normalizedWorkdir,
       serviceTier: settings.serviceTier,
     });
 
@@ -241,8 +515,29 @@ export class BridgeService {
       return null;
     }
 
+    const nextWorkdir = this.normalizeSessionWorkdir(
+      patch.workdir == null ? currentSession.workdir : patch.workdir,
+      currentSession,
+    );
+    const workdirChanged = nextWorkdir !== currentSession.workdir;
+    if (workdirChanged) {
+      const queueState = this.getQueueState(sessionId);
+      const hasActiveWork = Boolean(
+        queueState.processing || queueState.activeRun || queueState.items.length > 0,
+      );
+      if (hasActiveWork) {
+        throw new Error(
+          "Cannot change the working directory while this session is running or queued.",
+        );
+      }
+    }
+
     const settings = this.normalizeSessionSettings(patch, currentSession);
-    const updated = this.store.updateSession(sessionId, settings);
+    const updated = this.store.updateSession(sessionId, {
+      ...settings,
+      workdir: nextWorkdir,
+      codexThreadId: workdirChanged ? null : currentSession.codexThreadId,
+    });
     this.bus.publish("session.updated", updated);
     return updated;
   }
@@ -292,8 +587,8 @@ export class BridgeService {
     };
   }
 
-  openDeveloperConsole(mode = "raw") {
-    return this.codex.openDeveloperConsole(mode);
+  openDeveloperConsole() {
+    return this.codex.openDeveloperConsole();
   }
 
   recoverSessionState(sessionId) {
@@ -353,8 +648,16 @@ export class BridgeService {
   }
 
   bindDiscordChannelWithName(sessionId, channelId, channelName = null) {
-    const clearedSessions = this.reassignDiscordChannel(channelId, sessionId);
-    const session = this.store.bindDiscordChannel(sessionId, channelId, channelName);
+    const normalizedChannelId = typeof channelId === "string" ? channelId.trim() || null : null;
+    const normalizedChannelName = normalizedChannelId ? channelName : null;
+    const clearedSessions = normalizedChannelId
+      ? this.reassignDiscordChannel(normalizedChannelId, sessionId)
+      : [];
+    const session = this.store.bindDiscordChannel(
+      sessionId,
+      normalizedChannelId,
+      normalizedChannelName,
+    );
     if (!session) {
       return null;
     }
@@ -407,6 +710,7 @@ export class BridgeService {
     source,
     discordMessageId = null,
     attachments = [],
+    metadata = {},
   }) {
     const session = this.getSession(sessionId);
     if (!session) {
@@ -428,6 +732,7 @@ export class BridgeService {
         text: normalizedText,
         discordMessageId,
         attachments: normalizedAttachments,
+        ...metadata,
       },
     });
 
@@ -583,6 +888,7 @@ export class BridgeService {
           pendingAssistantText = event.item.text;
         }
       },
+      workdir: session.workdir,
     });
 
     queueState.activeRun = activeRun;
@@ -674,5 +980,37 @@ export class BridgeService {
 
     this.bus.publish("error.created", event);
     return event;
+  }
+
+  async triggerScheduledJob({ name, prompt, target }) {
+    const normalizedTarget =
+      target && target.type === "session"
+        ? target
+        : {
+            type: "spawn",
+          };
+    const targetSession =
+      normalizedTarget.type === "spawn"
+        ? this.createSession({
+            title: formatScheduleSpawnSessionTitle(name),
+            ...this.getScheduleDefaults(),
+          })
+        : this.resolveScheduledSession(normalizedTarget.sessionId);
+    const result = await this.handleIncomingMessage({
+      sessionId: targetSession.id,
+      text: prompt,
+      source: "schedule",
+      metadata: {
+        scheduleName: name,
+        schedulePrompt: prompt,
+        scheduleTargetType: normalizedTarget.type,
+      },
+    });
+
+    return {
+      session: this.getSession(targetSession.id) || targetSession,
+      queue: result.queue,
+      userEvent: result.userEvent,
+    };
   }
 }

@@ -15,8 +15,10 @@ function parseSession(row) {
     model: row.model,
     reasoningEffort: row.model_reasoning_effort,
     profile: row.profile,
+    workdir: row.workdir,
     serviceTier: row.service_tier === "fast" ? "fast" : "flex",
     fastMode: row.service_tier === "fast",
+    userPromptCount: Number(row.user_prompt_count || 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -40,6 +42,16 @@ function parseEvent(row) {
 export class Store {
   constructor(db) {
     this.db = db;
+    const sessionSelectColumns = `
+      sessions.*,
+      (
+        SELECT COUNT(*)
+        FROM session_events
+        WHERE session_events.session_id = sessions.id
+          AND session_events.event_type = 'message.user'
+          AND session_events.source IN ('ui', 'discord')
+      ) AS user_prompt_count
+    `;
     this.createSessionStatement = db.prepare(`
       INSERT INTO sessions (
         id,
@@ -51,10 +63,11 @@ export class Store {
         model,
         model_reasoning_effort,
         profile,
+        workdir,
         service_tier,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.updateSessionStatement = db.prepare(`
       UPDATE sessions
@@ -67,24 +80,31 @@ export class Store {
         model = ?,
         model_reasoning_effort = ?,
         profile = ?,
+        workdir = ?,
         service_tier = ?,
         updated_at = ?
       WHERE id = ?
     `);
     this.getSessionStatement = db.prepare(`
-      SELECT * FROM sessions WHERE id = ?
+      SELECT ${sessionSelectColumns}
+      FROM sessions
+      WHERE id = ?
     `);
     this.listSessionsStatement = db.prepare(`
-      SELECT * FROM sessions ORDER BY updated_at DESC
+      SELECT ${sessionSelectColumns}
+      FROM sessions
+      ORDER BY updated_at DESC
     `);
     this.findByDiscordChannelStatement = db.prepare(`
-      SELECT * FROM sessions
+      SELECT ${sessionSelectColumns}
+      FROM sessions
       WHERE discord_channel_id = ?
       ORDER BY updated_at DESC
       LIMIT 1
     `);
     this.listByDiscordChannelStatement = db.prepare(`
-      SELECT * FROM sessions
+      SELECT ${sessionSelectColumns}
+      FROM sessions
       WHERE discord_channel_id = ?
       ORDER BY updated_at DESC
     `);
@@ -116,6 +136,7 @@ export class Store {
     model,
     reasoningEffort,
     profile,
+    workdir,
     serviceTier,
   }) {
     const now = new Date().toISOString();
@@ -129,8 +150,10 @@ export class Store {
       model,
       reasoningEffort,
       profile,
+      workdir,
       serviceTier,
       fastMode: serviceTier === "fast",
+      userPromptCount: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -145,6 +168,7 @@ export class Store {
       session.model,
       session.reasoningEffort,
       session.profile,
+      session.workdir,
       session.serviceTier,
       session.createdAt,
       session.updatedAt,
@@ -186,6 +210,7 @@ export class Store {
       next.model,
       next.reasoningEffort,
       next.profile,
+      next.workdir,
       next.serviceTier,
       next.updatedAt,
       next.id,
