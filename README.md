@@ -361,6 +361,11 @@ npm run tauri:build
 - `/codex fast off`
 - `/codex stop`
 
+進捗表示について:
+
+- Discord の `Working` 進捗は、同じ進捗メッセージを `Completed` / `Stopped` / `Error` へ更新します
+- `stop` は実行中の turn だけでなく未処理キューも止め、Discord 側にも停止結果を通知します
+
 旧形式のテキストコマンド:
 
 - `!status`

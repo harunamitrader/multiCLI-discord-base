@@ -524,13 +524,23 @@ export class DiscordAdapter {
 
     const status = tracker.pendingFinishedStatus;
     tracker.pendingFinishedStatus = null;
-    await tracker.channel
-      .send(formatFinishedStatusContent(status, tracker.startedAt))
-      .catch(() => null);
+    const content = formatFinishedStatusContent(status, tracker.startedAt);
+    if (tracker.messageId) {
+      const message = await tracker.channel.messages.fetch(tracker.messageId).catch(() => null);
+      if (message) {
+        await message.edit(content).catch(() => null);
+        return;
+      }
+    }
+
+    const message = await tracker.channel.send(content).catch(() => null);
+    if (message) {
+      tracker.messageId = message.id;
+    }
   }
 
   async publishProgressMessage(tracker, content) {
-    if (tracker.messageId && !tracker.hasTrailingMessages) {
+    if (tracker.messageId) {
       const message = await tracker.channel.messages.fetch(tracker.messageId).catch(() => null);
       if (message) {
         await message.edit(content);
@@ -622,6 +632,14 @@ export class DiscordAdapter {
 
     const tracker = this.progressTrackers.get(session.id);
     if (!tracker) {
+      const channel = await this.client.channels.fetch(session.discordChannelId).catch(() => null);
+      if (!channel || !channel.isTextBased()) {
+        return;
+      }
+
+      await channel
+        .send(formatFinishedStatusContent(event.payload.status, event.createdAt))
+        .catch(() => null);
       return;
     }
 
@@ -957,9 +975,19 @@ export class DiscordAdapter {
       return;
     }
 
+    const details = [];
+    if (result.cancelledRunning) {
+      details.push("cancelled current run");
+    }
+    if (result.clearedQueuedCount > 0) {
+      details.push(`cleared ${result.clearedQueuedCount} queued turn(s)`);
+    }
+
     await interaction.reply({
-      content: `Stopped session \`${session.id}\`.`,
-      ephemeral: true,
+      content:
+        details.length > 0
+          ? `Stopped session \`${session.id}\` (${details.join(", ")}).`
+          : `Stopped session \`${session.id}\`.`,
     });
   }
 
