@@ -525,33 +525,29 @@ export class DiscordAdapter {
     const status = tracker.pendingFinishedStatus;
     tracker.pendingFinishedStatus = null;
     const content = formatFinishedStatusContent(status, tracker.startedAt);
+    await this.replaceProgressMessage(tracker, content);
+  }
+
+  async replaceProgressMessage(tracker, content) {
+    if (!tracker?.channel) {
+      return null;
+    }
+
     if (tracker.messageId) {
       const message = await tracker.channel.messages.fetch(tracker.messageId).catch(() => null);
       if (message) {
-        await message.edit(content).catch(() => null);
-        return;
+        await message.delete().catch(() => null);
       }
     }
 
     const message = await tracker.channel.send(content).catch(() => null);
-    if (message) {
-      tracker.messageId = message.id;
-    }
+    tracker.messageId = message?.id || null;
+    tracker.hasTrailingMessages = false;
+    return message;
   }
 
   async publishProgressMessage(tracker, content) {
-    if (tracker.messageId) {
-      const message = await tracker.channel.messages.fetch(tracker.messageId).catch(() => null);
-      if (message) {
-        await message.edit(content);
-        return message;
-      }
-    }
-
-    const message = await tracker.channel.send(content);
-    tracker.messageId = message.id;
-    tracker.hasTrailingMessages = false;
-    return message;
+    return this.replaceProgressMessage(tracker, content);
   }
 
   scheduleProgressTrackerRefresh(sessionId) {

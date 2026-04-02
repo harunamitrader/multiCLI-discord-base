@@ -2,6 +2,12 @@
 
 このファイルでは、このプロジェクトの主な変更を記録します。
 
+## 0.1.67 - 2026-04-02
+
+- Discord の進捗表示を再調整し、古い `Working` / 終了ステータスを削除してから、新しい進捗・最終状態を末尾へ再投稿するよう改善
+- `Working` メッセージが残留せず、`Stopped` / `Completed` / `Error` がその時点の最下部に出る挙動を実チャンネルで再確認
+- HTML / service worker / manifest / package version を `0.1.67` に更新
+
 ## 0.1.66 - 2026-04-02
 
 - Discord 側の進捗表示を調整し、`Working` の進捗メッセージを同じメッセージのまま `Completed` / `Stopped` / `Error` へ更新するよう改善

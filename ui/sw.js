@@ -1,15 +1,15 @@
-const CACHE_NAME = "codex-discord-connected-display-shell-v66";
+const CACHE_NAME = "codex-discord-connected-display-shell-v67";
 const SHELL_ASSETS = [
   "/",
-  "/index.html?v=0.1.66",
-  "/styles.css?v=0.1.66",
-  "/app.js?v=0.1.66",
-  "/manifest.webmanifest?v=0.1.66",
-  "/icon.svg?v=0.1.66",
-  "/icon-maskable.svg?v=0.1.66",
-  "/icon-192.png?v=0.1.66",
-  "/icon-512.png?v=0.1.66",
-  "/icon-maskable-512.png?v=0.1.66",
+  "/index.html?v=0.1.67",
+  "/styles.css?v=0.1.67",
+  "/app.js?v=0.1.67",
+  "/manifest.webmanifest?v=0.1.67",
+  "/icon.svg?v=0.1.67",
+  "/icon-maskable.svg?v=0.1.67",
+  "/icon-192.png?v=0.1.67",
+  "/icon-512.png?v=0.1.67",
+  "/icon-maskable-512.png?v=0.1.67",
 ];
 
 function isNavigationRequest(requestUrl) {

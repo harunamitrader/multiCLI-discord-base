@@ -363,7 +363,7 @@ npm run tauri:build
 
 進捗表示について:
 
-- Discord の `Working` 進捗は、同じ進捗メッセージを `Completed` / `Stopped` / `Error` へ更新します
+- Discord の `Working` 進捗は、前の進捗メッセージを削除してから、新しい `Working` / `Completed` / `Stopped` / `Error` を末尾へ送ります
 - `stop` は実行中の turn だけでなく未処理キューも止め、Discord 側にも停止結果を通知します
 
 旧形式のテキストコマンド:
