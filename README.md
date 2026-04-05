@@ -322,6 +322,57 @@ npm run tauri:build
 .\launch-direct.ps1
 ```
 
+## Codex の実行モード設定
+
+codicodi はチャット内で承認ダイアログを操作する機能がないため、フルオートで動作させる設定が必要です。`.env` で以下の3パターンから選んでください。
+
+### ★ 推奨: フルオート＋安全網あり
+
+```env
+CODEX_BYPASS_APPROVALS_AND_SANDBOX=false
+CODEX_APPROVAL_POLICY=never
+CODEX_SANDBOX_MODE=workspace-write
+CODEX_WORKDIR=C:\Users\yourname\Desktop\AI\repos\myproject
+```
+
+承認プロンプトなし、かつ `CODEX_WORKDIR` 外への書き込みをサンドボックスが制限します。
+
+**さらに安全にするための運用ポイント:**
+
+- `CODEX_WORKDIR` はプロジェクト単位の狭いフォルダを指定する（広い親フォルダにしない）
+- `CODEX_WORKDIR` を Git リポジトリにしておくと、承認なしで動いた変更を `git diff` / `git restore` で確認・巻き戻しできる
+
+この設定を使う場合、`CODEX_WORKDIR` に指定したフォルダを Codex CLI の設定で trusted にしてください。
+
+```toml
+# ~/.codex/config.toml
+[projects.'C:\Users\yourname\Desktop\AI\repos\myproject']
+trust_level = "trusted"
+```
+
+### 次点: フルオート＋最低限の安全網
+
+```env
+CODEX_BYPASS_APPROVALS_AND_SANDBOX=false
+CODEX_APPROVAL_POLICY=never
+CODEX_SANDBOX_MODE=workspace-write
+CODEX_WORKDIR=C:\Users\yourname\Desktop\AI
+```
+
+推奨と仕組みは同じですが、`CODEX_WORKDIR` が広いフォルダの場合、サンドボックスの制限範囲も広くなります。
+
+### ⚠️ 最終手段: 制限なし
+
+```env
+CODEX_BYPASS_APPROVALS_AND_SANDBOX=true
+```
+
+承認プロンプトとサンドボックスを**完全に無効化**します。Codex は PC 上のあらゆるフォルダへの書き込みや、意図しないコマンドの実行が可能になります。
+
+誤ったプロンプトや予期しない動作で **重要ファイルの削除・上書きが起きても巻き戻しができません。** 他の設定で動かない場合の最終手段として使ってください。
+
+> **共通の注意:** いずれのパターンも、信頼できるプロンプトを送る前提での設定です。不特定多数が書き込めるチャンネルでは使わないでください。
+
 ## アプリの使い方
 
 ### ローカル UI
