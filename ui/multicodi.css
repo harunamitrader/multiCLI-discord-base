@@ -391,20 +391,44 @@ html, body { height: 100%; overflow: hidden; }
 
 .btn-outline:hover { background: rgba(255,255,255,0.08); }
 
-/* ── Terminal placeholder ─────────────────────────────────── */
-.terminal-placeholder {
-  flex: 1;
+/* ── Terminal ─────────────────────────────────────────────── */
+.terminal-toolbar {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--text-muted);
+  gap: 12px;
+  padding: 6px 12px;
   background: #1a1a2e;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  flex-shrink: 0;
+}
+
+.terminal-label {
+  font-size: 12px;
+  color: #7289da;
   font-family: monospace;
 }
 
-.terminal-placeholder p { color: #7289da; }
+.btn-terminal-kill {
+  margin-left: auto;
+  padding: 3px 10px;
+  background: rgba(240,71,71,0.2);
+  border: 1px solid var(--status-error);
+  color: var(--status-error);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s;
+}
+
+.btn-terminal-kill:hover:not(:disabled) { background: rgba(240,71,71,0.4); }
+.btn-terminal-kill:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.terminal-container {
+  flex: 1;
+  background: #0d0d0d;
+  overflow: hidden;
+  padding: 4px;
+}
 
 /* ── Empty state ──────────────────────────────────────────── */
 .empty-chat {

@@ -11,6 +11,7 @@ import { DiscordAdapter } from "./discord-adapter.js";
 import { FileWatcherService } from "./file-watcher.js";
 import { createHttpServer } from "./http-server.js";
 import { SchedulerService } from "./scheduler.js";
+import { PtyService } from "./pty-service.js";
 
 const RESTART_EXIT_CODE = 42;
 
@@ -31,12 +32,14 @@ async function main() {
   let fileWatcher = null;
   let scheduler = null;
   let server = null;
+  let ptyService = null;
   const shutdown = async () => {
     if (shutdownPromise) {
       return shutdownPromise;
     }
 
     shutdownPromise = (async () => {
+      ptyService?.stopAll?.();
       agentBridge?.stopAll?.();
       agentRegistry?.stopAll?.();
       await scheduler?.stopAll?.();
@@ -67,6 +70,7 @@ async function main() {
 
     return restartPromise;
   };
+  ptyService = new PtyService({ agentRegistry, config });
   discord = new DiscordAdapter({ bridge, agentBridge, bus, config, attachments, restartServer, agentRegistry });
   fileWatcher = new FileWatcherService({ config, discord });
   scheduler = new SchedulerService({ config, bus });
@@ -79,6 +83,7 @@ async function main() {
     attachments,
     scheduler,
     restartServer,
+    ptyService,
   });
 
   try {

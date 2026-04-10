@@ -88,8 +88,9 @@ export function createHttpServer({
   attachments,
   scheduler,
   restartServer,
+  ptyService,
 }) {
-  return http.createServer(async (request, response) => {
+  const httpServer = http.createServer(async (request, response) => {
     try {
       const url = buildRequestUrl(request);
       const pathname = url.pathname;
@@ -175,6 +176,20 @@ export function createHttpServer({
 
       if (pathname.startsWith("/uploads/") && request.method === "GET") {
         serveUploadsFile(response, config.uploadsDir, pathname);
+        return;
+      }
+
+      // Serve xterm.js library files from node_modules
+      if (pathname.startsWith("/xterm/") && request.method === "GET") {
+        const rel = pathname.slice("/xterm/".length);
+        const allowedFiles = {
+          "xterm.js": "node_modules/@xterm/xterm/lib/xterm.js",
+          "xterm.css": "node_modules/@xterm/xterm/css/xterm.css",
+          "addon-fit.js": "node_modules/@xterm/addon-fit/lib/addon-fit.js",
+        };
+        const target = allowedFiles[rel];
+        if (!target) { response.writeHead(404); response.end("Not found"); return; }
+        serveFile(response, path.resolve(target));
         return;
       }
 
@@ -597,4 +612,22 @@ export function createHttpServer({
       });
     }
   });
+
+  // Attach PTY WebSocket server after httpServer is created
+  if (ptyService) {
+    // We defer attach until the server is actually listening
+    httpServer._ptyServicePending = ptyService;
+  }
+
+  const _origListen = httpServer.listen.bind(httpServer);
+  httpServer.listen = function (...args) {
+    const result = _origListen(...args);
+    if (httpServer._ptyServicePending) {
+      httpServer._ptyServicePending.attach(httpServer);
+      httpServer._ptyServicePending = null;
+    }
+    return result;
+  };
+
+  return httpServer;
 }

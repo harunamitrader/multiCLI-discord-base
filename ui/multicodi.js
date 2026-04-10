@@ -37,6 +37,9 @@ const workspaceSelectEl = $("workspace-select");
 const btnWorkspaceAdd = $("btn-workspace-add");
 const btnWorkspaceDel = $("btn-workspace-del");
 const btnStopAll = $("btn-stop-all");
+const terminalContainerEl = $("terminal-container");
+const terminalAgentLabel = $("terminal-agent-label");
+const btnTerminalKill = $("btn-terminal-kill");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -547,6 +550,119 @@ agentListEl.addEventListener("click", (e) => {
   const item = e.target.closest(".agent-item");
   if (item) selectAgentWithHistory(item.dataset.agent);
 }, true);
+
+// ── Terminal (xterm.js + WebSocket PTY) ───────────────────────────────────
+
+const terminal = {
+  xterm: null,       // Terminal instance
+  fitAddon: null,    // FitAddon instance
+  ws: null,          // WebSocket
+  agentName: null,   // currently connected agent
+  resizeObserver: null,
+};
+
+function initXterm() {
+  if (terminal.xterm) return; // already initialized
+  // xterm.js is loaded as a global via <script>
+  const { Terminal } = window;
+  const { FitAddon } = window;
+  if (!Terminal || !FitAddon) {
+    console.warn("xterm.js not loaded");
+    return;
+  }
+  terminal.xterm = new Terminal({
+    theme: { background: "#0d0d0d", foreground: "#d4d4d4", cursor: "#7289da" },
+    fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
+    fontSize: 13,
+    cursorBlink: true,
+    allowTransparency: true,
+    scrollback: 5000,
+  });
+  terminal.fitAddon = new FitAddon();
+  terminal.xterm.loadAddon(terminal.fitAddon);
+  terminal.xterm.open(terminalContainerEl);
+  terminal.fitAddon.fit();
+
+  // Send input to PTY
+  terminal.xterm.onData((data) => {
+    if (terminal.ws?.readyState === WebSocket.OPEN) {
+      terminal.ws.send(data);
+    }
+  });
+
+  // Resize observer to keep terminal fitted
+  terminal.resizeObserver = new ResizeObserver(() => {
+    try {
+      terminal.fitAddon.fit();
+      if (terminal.ws?.readyState === WebSocket.OPEN) {
+        const { cols, rows } = terminal.xterm;
+        terminal.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    } catch {}
+  });
+  terminal.resizeObserver.observe(terminalContainerEl);
+}
+
+function connectTerminal(agentName) {
+  if (terminal.agentName === agentName && terminal.ws?.readyState === WebSocket.OPEN) {
+    return; // already connected to this agent
+  }
+
+  // Disconnect previous
+  if (terminal.ws) {
+    terminal.ws.close();
+    terminal.ws = null;
+  }
+
+  initXterm();
+  if (!terminal.xterm) return;
+
+  terminal.agentName = agentName;
+  terminalAgentLabel.textContent = `🖥 ${agentName} — PTY`;
+  btnTerminalKill.disabled = false;
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/pty?agent=${encodeURIComponent(agentName)}`);
+  terminal.ws = ws;
+
+  ws.onopen = () => {
+    const { cols, rows } = terminal.xterm;
+    ws.send(JSON.stringify({ type: "resize", cols, rows }));
+  };
+
+  ws.onmessage = (e) => {
+    terminal.xterm.write(e.data);
+  };
+
+  ws.onerror = () => {
+    terminal.xterm.writeln("\r\n\x1b[31m[WebSocket error — reconnecting in 3s]\x1b[0m");
+  };
+
+  ws.onclose = () => {
+    terminal.xterm.writeln("\r\n\x1b[33m[接続が切れました]\x1b[0m");
+    btnTerminalKill.disabled = true;
+    terminal.ws = null;
+  };
+}
+
+btnTerminalKill.addEventListener("click", async () => {
+  if (!terminal.agentName) return;
+  if (!confirm(`${terminal.agentName} のターミナルセッションを終了しますか？`)) return;
+  // Close WebSocket — server PTY will be killed when no clients remain OR on next connect
+  if (terminal.ws) { terminal.ws.close(); terminal.ws = null; }
+  terminal.xterm?.writeln("\r\n\x1b[33m[セッションを終了しました]\x1b[0m");
+  btnTerminalKill.disabled = true;
+});
+
+// Connect terminal when switching to Terminal tab
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.tab === "terminal" && state.selectedAgent) {
+      // Defer slightly to let the tab become visible first (needed for fit)
+      requestAnimationFrame(() => connectTerminal(state.selectedAgent));
+    }
+  });
+});
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 

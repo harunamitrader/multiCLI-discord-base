@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>multicodi</title>
     <link rel="stylesheet" href="/multicodi.css" />
+    <link rel="stylesheet" href="/xterm/xterm.css" />
   </head>
   <body>
     <div class="shell">
@@ -57,16 +58,19 @@
           </div>
         </section>
 
-        <!-- Terminal tab (placeholder — Phase 5 で node-pty 接続) -->
+        <!-- Terminal tab -->
         <section class="tab-panel" id="tab-terminal">
-          <div class="terminal-placeholder">
-            <p>🖥 Terminal view は Phase 5 で実装予定です。</p>
-            <p>現在は Chat タブからエージェントを操作できます。</p>
+          <div class="terminal-toolbar" id="terminal-toolbar">
+            <span id="terminal-agent-label" class="terminal-label">エージェントを選択してください</span>
+            <button class="btn-terminal-kill" id="btn-terminal-kill" title="ターミナルを終了" disabled>⏹ 終了</button>
           </div>
+          <div id="terminal-container" class="terminal-container"></div>
         </section>
       </main>
     </div>
 
+    <script src="/xterm/xterm.js"></script>
+    <script src="/xterm/addon-fit.js"></script>
     <script src="/multicodi.js" type="module"></script>
   </body>
 </html>
