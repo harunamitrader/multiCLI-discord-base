@@ -40,6 +40,9 @@ const btnStopAll = $("btn-stop-all");
 const terminalContainerEl = $("terminal-container");
 const terminalAgentLabel = $("terminal-agent-label");
 const btnTerminalKill = $("btn-terminal-kill");
+const toastContainerEl = $("toast-container");
+const settingsWorkdirEl = $("settings-workdir");
+const btnSaveWorkdirEl = $("btn-save-workdir");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -154,12 +157,14 @@ function renderAgentList() {
     const el = document.createElement("div");
     el.className = `agent-item ${agent.name === state.selectedAgent ? "active" : ""}`;
     el.dataset.agent = agent.name;
+    const costHint = agent._costJpy ? `¥${agent._costJpy}` : "";
     el.innerHTML = `
       <div class="status-dot ${agent.status ?? "idle"}" id="dot-${agent.name}"></div>
       <div class="agent-info">
         <div class="agent-name">${escHtml(agent.name)}</div>
         <div class="agent-type">${escHtml(agent.type)} ${agent.model ? `· ${agent.model.split("-").slice(-1)[0]}` : ""}</div>
       </div>
+      <span class="cost-badge" id="cost-${agent.name}" ${costHint ? "" : 'style="display:none"'}>${escHtml(costHint)}</span>
     `;
     el.addEventListener("click", () => selectAgent(agent.name));
     agentListEl.appendChild(el);
@@ -407,12 +412,12 @@ async function sendMessage() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "送信失敗" }));
-      appendSystemMsg(`❌ ${err.error ?? "送信失敗"}`);
+      showToast(`❌ ${err.error ?? "送信失敗"}`, "error");
       btnSendEl.disabled = false;
     }
     // Success: result comes via SSE events
   } catch (e) {
-    appendSystemMsg(`❌ ネットワークエラー: ${e.message}`);
+    showToast(`❌ ネットワークエラー: ${e.message}`, "error");
     btnSendEl.disabled = false;
   }
 }
@@ -456,23 +461,23 @@ btnWorkspaceAdd.addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: name.trim() }),
   });
-  if (!res.ok) { alert("作成に失敗しました"); return; }
-  await loadWorkspaces();
-  // Auto-switch to new workspace
+  if (!res.ok) { showToast("❌ ワークスペース作成に失敗しました", "error"); return; }
   const ws = await res.json();
+  showToast(`✅ ワークスペース "${ws.name}" を作成しました`, "success");
+  await loadWorkspaces();
   workspaceSelectEl.value = ws.id;
   workspaceSelectEl.dispatchEvent(new Event("change"));
 });
 
 btnWorkspaceDel.addEventListener("click", async () => {
   const wsId = workspaceSelectEl.value;
-  if (wsId === "default") { alert("defaultワークスペースは削除できません。"); return; }
+  if (wsId === "default") { showToast("defaultワークスペースは削除できません。", "error"); return; }
   const name = workspaceSelectEl.options[workspaceSelectEl.selectedIndex]?.text;
   if (!confirm(`ワークスペース "${name}" を削除しますか？\n（エージェントのセッション履歴は残ります）`)) return;
   const res = await fetch(`/api/workspaces/${wsId}`, { method: "DELETE" });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    alert(err.error ?? "削除に失敗しました");
+    showToast(err.error ?? "❌ 削除に失敗しました", "error");
     return;
   }
   // Switch to default after delete
@@ -664,11 +669,88 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
+// ── Toast notifications ────────────────────────────────────────────────────
+
+function showToast(text, type = "info", duration = 4000) {
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+  el.textContent = text;
+  toastContainerEl.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = "opacity 0.3s";
+    el.style.opacity = "0";
+    setTimeout(() => el.remove(), 300);
+  }, duration);
+}
+
+// ── Settings panel ─────────────────────────────────────────────────────────
+
+function loadSettingsWorkdir() {
+  const ws = state.workspaceId;
+  // Find workspace info
+  const wsEl = workspaceSelectEl.options[workspaceSelectEl.selectedIndex];
+  // Load from API
+  fetch(`/api/workspaces`).then((r) => r.json()).then((workspaces) => {
+    const current = workspaces.find((w) => w.id === state.workspaceId);
+    if (current && settingsWorkdirEl) {
+      settingsWorkdirEl.value = current.workdir ?? "";
+    }
+  }).catch(() => {});
+}
+
+if (btnSaveWorkdirEl) {
+  btnSaveWorkdirEl.addEventListener("click", async () => {
+    const workdir = settingsWorkdirEl.value.trim();
+    const res = await fetch(`/api/workspaces/${state.workspaceId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workdir: workdir || null }),
+    });
+    if (res.ok) {
+      showToast("✅ workdir を保存しました", "success");
+    } else {
+      showToast("❌ 保存に失敗しました", "error");
+    }
+  });
+}
+
+// Load settings when Settings tab is opened
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.tab === "settings") loadSettingsWorkdir();
+  });
+});
+
+// ── Cost summary ──────────────────────────────────────────────────────────
+
+async function loadCostSummary() {
+  try {
+    const res = await fetch("/api/cost?period=month");
+    if (!res.ok) return;
+    const rows = await res.json();
+    // Attach cost to each agent in state and update sidebar
+    for (const row of rows) {
+      const agent = state.agents.find((a) => a.name === row.agentName);
+      if (agent) {
+        agent._costJpy = row.totalCostJpy;
+        agent._costUsd = row.totalCostUsd;
+      }
+      // Update cost badge in sidebar
+      const badge = document.getElementById(`cost-${row.agentName}`);
+      if (badge && row.totalCostUsd > 0) {
+        badge.textContent = `¥${row.totalCostJpy}`;
+        badge.style.display = "";
+      }
+    }
+  } catch {}
+}
+
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
   await loadWorkspaces();
   await loadAgents();
+  await loadCostSummary();
 
   // Auto-select first agent
   if (state.agents.length > 0) {
@@ -677,8 +759,9 @@ async function boot() {
 
   connectSSE();
 
-  // Poll agent statuses every 5s
+  // Poll agent statuses every 5s; cost every 60s
   setInterval(loadAgents, 5000);
+  setInterval(loadCostSummary, 60_000);
 }
 
 boot();

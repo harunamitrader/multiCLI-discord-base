@@ -524,11 +524,14 @@ export function createHttpServer({
           return;
         }
 
-        // PATCH /api/workspaces/:id — rename workspace
+        // PATCH /api/workspaces/:id — rename/update workspace
         const wsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
         if (wsMatch && request.method === "PATCH") {
           const body = await readJsonBody(request);
-          const ws = agentBridge.renameWorkspace(wsMatch[1], body.name?.trim());
+          const ws = agentBridge.store.updateWorkspace(wsMatch[1], {
+            name: body.name?.trim() || undefined,
+            workdir: body.workdir?.trim() || undefined,
+          });
           if (!ws) { sendJson(response, 404, { error: "Workspace not found" }); return; }
           sendJson(response, 200, ws);
           return;
@@ -597,6 +600,15 @@ export function createHttpServer({
           const agentName = agentRunsMatch[1];
           const ws = agentBridge.getActiveWorkspace();
           sendJson(response, 200, agentBridge.listRuns(agentName, ws?.id ?? "default"));
+          return;
+        }
+
+        // GET /api/cost — cost summary
+        if (pathname === "/api/cost" && request.method === "GET") {
+          const period = url.searchParams.get("period") || "all";
+          const agentName = url.searchParams.get("agent") || undefined;
+          const wsId = url.searchParams.get("workspace") || agentBridge.getActiveWorkspace()?.id;
+          sendJson(response, 200, agentBridge.getCostSummary({ agentName, workspaceId: wsId, period }));
           return;
         }
       }

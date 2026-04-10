@@ -41,6 +41,7 @@
           <div class="tab-bar">
             <button class="tab-btn active" data-tab="chat">💬 Chat</button>
             <button class="tab-btn" data-tab="terminal">🖥 Terminal</button>
+            <button class="tab-btn" data-tab="settings">⚙ Settings</button>
           </div>
         </header>
 
@@ -66,8 +67,60 @@
           </div>
           <div id="terminal-container" class="terminal-container"></div>
         </section>
+
+        <!-- Settings tab -->
+        <section class="tab-panel" id="tab-settings">
+          <div class="settings-panel">
+            <h2 class="settings-title">⚙ Settings</h2>
+
+            <section class="settings-section">
+              <h3>ワークスペース設定</h3>
+              <div class="settings-form">
+                <label>作業ディレクトリ (workdir)</label>
+                <input id="settings-workdir" type="text" class="settings-input" placeholder="例: C:\Users\you\projects\myapp" />
+                <button id="btn-save-workdir" class="btn-settings-save">保存</button>
+              </div>
+            </section>
+
+            <section class="settings-section">
+              <h3>エージェント設定ガイド</h3>
+              <p class="settings-hint">
+                エージェントを追加するには <code>.env</code> ファイルに以下を記載してサーバーを再起動してください:
+              </p>
+              <pre class="settings-code"># Claude エージェント "hanako"
+AGENT_HANAKO_TYPE=claude
+AGENT_HANAKO_MODEL=claude-sonnet-4-6
+
+# Gemini エージェント "taro"
+AGENT_TARO_TYPE=gemini
+AGENT_TARO_MODEL=gemini-2.5-flash
+
+# Codex エージェント "jiro"
+AGENT_JIRO_TYPE=codex
+AGENT_JIRO_MODEL=codex-mini-latest</pre>
+            </section>
+
+            <section class="settings-section">
+              <h3>Discord コマンド一覧</h3>
+              <table class="settings-table">
+                <tr><td><code>hanako? &lt;prompt&gt;</code></td><td>hanako にプロンプトを送る</td></tr>
+                <tr><td><code>hanako stop?</code></td><td>hanako を停止</td></tr>
+                <tr><td><code>hanako new?</code></td><td>hanako のセッションをリセット</td></tr>
+                <tr><td><code>agents?</code></td><td>エージェント一覧を表示</td></tr>
+                <tr><td><code>stop?</code></td><td>全エージェントを停止</td></tr>
+                <tr><td><code>workspace?</code></td><td>現在のワークスペースを表示</td></tr>
+                <tr><td><code>workspace? &lt;name&gt;</code></td><td>ワークスペースを切り替え/作成</td></tr>
+                <tr><td><code>cost?</code></td><td>コストサマリー（累計）</td></tr>
+                <tr><td><code>cost? today|week|month</code></td><td>期間指定コストサマリー</td></tr>
+              </table>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container"></div>
 
     <script src="/xterm/xterm.js"></script>
     <script src="/xterm/addon-fit.js"></script>

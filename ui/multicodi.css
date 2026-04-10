@@ -143,6 +143,16 @@ html, body { height: 100%; overflow: hidden; }
 .agent-name { font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-type { font-size: 11px; color: var(--text-muted); }
 
+.cost-badge {
+  font-size: 10px;
+  color: #faa61a;
+  background: rgba(250,166,26,0.15);
+  border-radius: 8px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .loading-note { padding: 12px; font-size: 12px; color: var(--text-muted); }
 
 .sidebar-footer {
@@ -442,6 +452,139 @@ html, body { height: 100%; overflow: hidden; }
 }
 
 .empty-chat-icon { font-size: 48px; }
+
+/* ── Settings panel ──────────────────────────────────────── */
+.settings-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.settings-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 24px;
+  color: var(--text);
+}
+
+.settings-section {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+
+.settings-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+
+.settings-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.settings-form label {
+  font-size: 13px;
+  color: var(--text-muted);
+  width: 100%;
+}
+
+.settings-input {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  outline: none;
+  font-family: monospace;
+}
+
+.settings-input:focus { border-color: var(--brand-color); }
+
+.btn-settings-save {
+  padding: 6px 14px;
+  background: var(--brand-color);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-settings-save:hover { opacity: 0.85; }
+
+.settings-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.settings-hint code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+
+.settings-code {
+  background: #1a1a2e;
+  color: #d4d4d4;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.settings-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-table td:first-child { width: 40%; }
+.settings-table code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+/* ── Toast notifications ─────────────────────────────────── */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #fff;
+  min-width: 200px;
+  max-width: 360px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  animation: toast-in 0.2s ease;
+  pointer-events: auto;
+}
+
+.toast.error { background: var(--status-error); }
+.toast.success { background: var(--status-idle); }
+.toast.info { background: var(--brand-color); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 /* ── Scrollbar ────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

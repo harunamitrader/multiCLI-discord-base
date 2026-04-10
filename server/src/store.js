@@ -230,6 +230,21 @@ export class Store {
     this.listRunsStatement = db.prepare(
       `SELECT * FROM runs WHERE agent_name=? AND workspace_id=? ORDER BY started_at DESC LIMIT ?`
     );
+    this.costSummaryStatement = db.prepare(`
+      SELECT
+        agent_name,
+        COUNT(*) AS run_count,
+        COALESCE(SUM(input_tokens), 0)  AS total_input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+        COALESCE(SUM(cost_usd), 0)      AS total_cost_usd
+      FROM runs
+      WHERE status='completed'
+        AND (? IS NULL OR agent_name=?)
+        AND (? IS NULL OR workspace_id=?)
+        AND (? IS NULL OR started_at >= ?)
+      GROUP BY agent_name
+      ORDER BY total_cost_usd DESC
+    `);
 
     // ---- Message statements ----
     this.insertMessageStatement = db.prepare(`
@@ -473,6 +488,26 @@ export class Store {
 
   listRuns(agentName, workspaceId, limit = 50) {
     return this.listRunsStatement.all(agentName, workspaceId, limit).map(parseRun);
+  }
+
+  /**
+   * Aggregate cost summary.
+   * @param {{ agentName?: string, workspaceId?: string, since?: string }} opts  since = ISO date string
+   */
+  getCostSummary({ agentName, workspaceId, since } = {}) {
+    const rows = this.costSummaryStatement.all(
+      agentName ?? null, agentName ?? null,
+      workspaceId ?? null, workspaceId ?? null,
+      since ?? null, since ?? null,
+    );
+    return rows.map((r) => ({
+      agentName: r.agent_name,
+      runCount: r.run_count,
+      totalInputTokens: r.total_input_tokens,
+      totalOutputTokens: r.total_output_tokens,
+      totalCostUsd: r.total_cost_usd,
+      totalCostJpy: Math.round(r.total_cost_usd * 150 * 10) / 10,
+    }));
   }
 
   // ---------------------------------------------------------------------------

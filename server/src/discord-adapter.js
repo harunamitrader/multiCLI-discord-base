@@ -247,11 +247,13 @@ function formatScheduledInputMessage(payload) {
 function parseAgentCommand(content, agentNames) {
   const trimmed = content.trim();
 
-  // Global commands: "stop?" / "agents?" / "workspace?" / "workspace? <name>"
+  // Global commands: "stop?" / "agents?" / "workspace?" / "cost?"
   if (/^stop\?$/i.test(trimmed)) return { agent: null, verb: "stop", prompt: null };
   if (/^agents?\?$/i.test(trimmed)) return { agent: null, verb: "agents", prompt: null };
   const wsMatch = trimmed.match(/^workspace\?\s*([\s\S]*)$/i);
   if (wsMatch) return { agent: null, verb: "workspace", prompt: wsMatch[1].trim() };
+  const costMatch = trimmed.match(/^cost\?\s*(today|week|month|all)?$/i);
+  if (costMatch) return { agent: null, verb: "cost", prompt: (costMatch[1] || "all").toLowerCase() };
 
   // "hanako new?" / "hanako stop?" — verb before ?
   const verbMatch = trimmed.match(/^(\S+)\s+(new|stop|reset)\?$/i);
@@ -1233,6 +1235,25 @@ export class DiscordAdapter {
       }
       ab.bindDiscordChannel({ discordChannelId: channelId, workspaceId: workspace.id });
       await message.reply(`✅ このチャンネルをワークスペース **${workspace.name}** に紐づけました。`);
+      return;
+    }
+
+    // Global: "cost?" / "cost? today|week|month|all"
+    if (!agentName && verb === "cost") {
+      const period = prompt || "all";
+      if (!ab) { await message.reply("AgentBridge が利用できません。"); return; }
+      const rows = ab.getCostSummary({ period });
+      if (rows.length === 0) {
+        await message.reply(`📊 コスト記録なし（期間: ${period}）`);
+        return;
+      }
+      const periodLabel = { today: "今日", week: "過去7日", month: "過去30日", all: "累計" }[period] || period;
+      const lines = rows.map((r) =>
+        `• **${r.agentName}**: ${r.runCount}回 / in ${r.totalInputTokens.toLocaleString()} + out ${r.totalOutputTokens.toLocaleString()} tokens / **¥${r.totalCostJpy} ($${r.totalCostUsd.toFixed(4)})**`
+      );
+      const total = rows.reduce((s, r) => ({ usd: s.usd + r.totalCostUsd, jpy: s.jpy + r.totalCostJpy }), { usd: 0, jpy: 0 });
+      lines.push(`\n合計: **¥${total.jpy.toFixed(1)} ($${total.usd.toFixed(4)})**`);
+      await message.reply(`📊 **コストサマリー（${periodLabel}）**\n${lines.join("\n")}`);
       return;
     }
 

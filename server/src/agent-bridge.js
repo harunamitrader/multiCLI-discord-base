@@ -11,6 +11,16 @@
 
 import { calcCost } from "./pricing.js";
 
+function periodToSince(period) {
+  if (!period || period === "all") return null;
+  const d = new Date();
+  if (period === "today") d.setHours(0, 0, 0, 0);
+  else if (period === "week") d.setDate(d.getDate() - 7);
+  else if (period === "month") d.setDate(d.getDate() - 30);
+  else return null;
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
 export class AgentBridge {
   /**
    * @param {{ agentRegistry, store, bus, config }} deps
@@ -245,6 +255,15 @@ export class AgentBridge {
 
   listRuns(agentName, workspaceId = "default", limit = 20) {
     return this.store.listRuns(agentName, workspaceId, limit);
+  }
+
+  /**
+   * Aggregate cost summary.
+   * @param {{ agentName?: string, workspaceId?: string, period?: "today"|"week"|"month"|"all" }} opts
+   */
+  getCostSummary({ agentName, workspaceId, period = "all" } = {}) {
+    const since = periodToSince(period);
+    return this.store.getCostSummary({ agentName, workspaceId, since });
   }
 
   // ---------------------------------------------------------------------------
