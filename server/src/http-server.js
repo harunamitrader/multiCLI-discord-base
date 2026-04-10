@@ -79,7 +79,16 @@ function buildRequestUrl(request) {
   return new URL(request.url || "/", "http://localhost");
 }
 
-export function createHttpServer({ config, bridge, bus, discord, attachments, scheduler }) {
+export function createHttpServer({
+  config,
+  bridge,
+  agentBridge,
+  bus,
+  discord,
+  attachments,
+  scheduler,
+  restartServer,
+}) {
   return http.createServer(async (request, response) => {
     try {
       const url = buildRequestUrl(request);
@@ -123,6 +132,26 @@ export function createHttpServer({ config, bridge, bus, discord, attachments, sc
         const result = bridge.openDeveloperConsole();
         const statusCode = result.ok ? 200 : 400;
         sendJson(response, statusCode, result);
+        return;
+      }
+
+      if (pathname === "/api/server/restart" && request.method === "POST") {
+        if (typeof restartServer !== "function") {
+          sendJson(response, 400, { error: "Server restart is not available." });
+          return;
+        }
+
+        sendJson(response, 202, {
+          accepted: true,
+          message:
+            "Restart requested. If the server was launched via codicodi-server.cmd or scripts/start-server.cmd, it will come back automatically.",
+        });
+
+        queueMicrotask(() => {
+          restartServer({ source: "ui", requestedBy: "Local UI" }).catch((error) => {
+            console.error("UI restart request failed:", error);
+          });
+        });
         return;
       }
 
@@ -313,6 +342,46 @@ export function createHttpServer({ config, bridge, bus, discord, attachments, sc
         return;
       }
 
+      const lastAssistantMessageMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/last-assistant-message$/,
+      );
+      if (lastAssistantMessageMatch && request.method === "GET") {
+        const result = bridge.getLastAssistantMessage(lastAssistantMessageMatch[1]);
+        if (!result) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        if (!String(result.message?.text || "").trim()) {
+          sendJson(response, 404, {
+            error: "No assistant message was found for this session yet.",
+          });
+          return;
+        }
+
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const recoverAssistantMessageMatch = pathname.match(
+        /^\/api\/sessions\/([^/]+)\/recover-last-assistant-message$/,
+      );
+      if (recoverAssistantMessageMatch && request.method === "POST") {
+        const result = bridge.recoverMissingAssistantMessage(recoverAssistantMessageMatch[1]);
+        if (!result) {
+          sendJson(response, 404, { error: "Session not found" });
+          return;
+        }
+
+        const detail = bridge.getSessionDetail(recoverAssistantMessageMatch[1]);
+        sendJson(response, 200, {
+          ...result,
+          session: detail?.session || result.session,
+          events: detail?.events || [],
+        });
+        return;
+      }
+
       const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
       if (messageMatch && request.method === "POST") {
         if (!bridge.getSession(messageMatch[1])) {
@@ -409,6 +478,114 @@ export function createHttpServer({ config, bridge, bus, discord, attachments, sc
         sendJson(response, 200, result);
         return;
       }
+
+      // ── multicodi: Agent API ──────────────────────────────────────────────
+      if (agentBridge) {
+        // GET /api/agents — list all agents
+        if (pathname === "/api/agents" && request.method === "GET") {
+          sendJson(response, 200, agentBridge.listAgents());
+          return;
+        }
+
+        // GET /api/workspaces — list workspaces
+        if (pathname === "/api/workspaces" && request.method === "GET") {
+          sendJson(response, 200, agentBridge.listWorkspaces());
+          return;
+        }
+
+        // POST /api/workspaces — create workspace
+        if (pathname === "/api/workspaces" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const ws = agentBridge.createWorkspace({ name: body.name, workdir: body.workdir });
+          sendJson(response, 201, ws);
+          return;
+        }
+
+        // POST /api/workspaces/:id/activate — switch active workspace
+        const wsActivateMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/activate$/);
+        if (wsActivateMatch && request.method === "POST") {
+          await agentBridge.switchWorkspace(wsActivateMatch[1]);
+          sendJson(response, 200, { ok: true, workspaceId: wsActivateMatch[1] });
+          return;
+        }
+
+        // PATCH /api/workspaces/:id — rename workspace
+        const wsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+        if (wsMatch && request.method === "PATCH") {
+          const body = await readJsonBody(request);
+          const ws = agentBridge.renameWorkspace(wsMatch[1], body.name?.trim());
+          if (!ws) { sendJson(response, 404, { error: "Workspace not found" }); return; }
+          sendJson(response, 200, ws);
+          return;
+        }
+
+        // DELETE /api/workspaces/:id — delete workspace
+        if (wsMatch && request.method === "DELETE") {
+          try {
+            const ws = agentBridge.deleteWorkspace(wsMatch[1]);
+            if (!ws) { sendJson(response, 404, { error: "Workspace not found" }); return; }
+            sendJson(response, 200, { deleted: true, workspace: ws });
+          } catch (err) {
+            sendJson(response, 400, { error: err.message });
+          }
+          return;
+        }
+
+        // POST /api/agents/:name/run — run prompt
+        const agentRunMatch = pathname.match(/^\/api\/agents\/([^/]+)\/run$/);
+        if (agentRunMatch && request.method === "POST") {
+          const agentName = agentRunMatch[1];
+          const body = await readJsonBody(request);
+          const ws = agentBridge.getActiveWorkspace();
+          // Fire and forget — result comes via SSE
+          agentBridge.runPrompt({
+            agentName,
+            prompt: body.prompt,
+            workspaceId: ws?.id ?? "default",
+            workdir: body.workdir,
+            source: "ui",
+          }).catch(() => {});
+          sendJson(response, 202, { ok: true, agentName });
+          return;
+        }
+
+        // POST /api/agents/:name/cancel — cancel running agent
+        const agentCancelMatch = pathname.match(/^\/api\/agents\/([^/]+)\/cancel$/);
+        if (agentCancelMatch && request.method === "POST") {
+          agentBridge.cancelAgent(agentCancelMatch[1]);
+          sendJson(response, 200, { ok: true });
+          return;
+        }
+
+        // POST /api/agents/:name/reset — reset session
+        const agentResetMatch = pathname.match(/^\/api\/agents\/([^/]+)\/reset$/);
+        if (agentResetMatch && request.method === "POST") {
+          const ws = agentBridge.getActiveWorkspace();
+          agentBridge.resetAgentSession(agentResetMatch[1], ws?.id ?? "default");
+          sendJson(response, 200, { ok: true });
+          return;
+        }
+
+        // GET /api/agents/:name/messages — chat history
+        const agentMsgMatch = pathname.match(/^\/api\/agents\/([^/]+)\/messages$/);
+        if (agentMsgMatch && request.method === "GET") {
+          const agentName = agentMsgMatch[1];
+          const ws = agentBridge.getActiveWorkspace();
+          const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+          sendJson(response, 200, agentBridge.listMessages(agentName, ws?.id ?? "default", limit));
+          return;
+        }
+
+        // GET /api/agents/:name/runs — run history
+        const agentRunsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/runs$/);
+        if (agentRunsMatch && request.method === "GET") {
+          const agentName = agentRunsMatch[1];
+          const ws = agentBridge.getActiveWorkspace();
+          sendJson(response, 200, agentBridge.listRuns(agentName, ws?.id ?? "default"));
+          return;
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
       const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");

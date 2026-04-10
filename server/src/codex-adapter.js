@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import readline from "node:readline";
+import { normalizeCodexEvent } from "./adapters/canonical-events.js";
 
 function buildArgs(config, threadId, sessionConfig, imagePaths = []) {
   const globalOptions = [];
@@ -247,7 +248,7 @@ export class CodexAdapter {
     };
   }
 
-  runTurn({ threadId, prompt, onEvent, sessionConfig, imagePaths = [], workdir }) {
+  runTurn({ threadId, prompt, agentName = "codex", onEvent, onCanonicalEvent, sessionConfig, imagePaths = [], workdir }) {
     const invocation = this.resolveInvocation(threadId, sessionConfig, imagePaths);
     const runId = ++this.runSequence;
     const runStartedAt = Date.now();
@@ -317,6 +318,12 @@ export class CodexAdapter {
           }
 
           onEvent?.(event);
+
+          if (onCanonicalEvent) {
+            for (const ce of normalizeCodexEvent(event, agentName)) {
+              onCanonicalEvent(ce);
+            }
+          }
         } catch {
           stderrLines.push(`Unparsed stdout: ${trimmed}`);
         }

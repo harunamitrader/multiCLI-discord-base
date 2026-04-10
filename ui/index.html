@@ -75,7 +75,8 @@
             <aside class="session-side-panel">
               <div class="session-action-card">
                 <div class="status-pill" id="status-pill" data-status="idle">idle</div>
-                <button id="restore-session-button" class="outline-button header-action-button" type="button">Restore Chat</button>
+                <button id="restore-session-button" class="outline-button header-action-button" type="button" hidden>Restore Chat</button>
+                <button id="last-assistant-message-button" class="outline-button header-action-button" type="button">Recover AI Message</button>
                 <button id="delete-session-button" class="secondary-button" type="button">Delete Session</button>
               </div>
             </aside>
@@ -110,6 +111,9 @@
               <article id="developer-tools-group" class="settings-card session-tools-card">
                 <button id="developer-console-button" class="outline-button developer-console-button" type="button">
                   Open Developer Console
+                </button>
+                <button id="restart-server-button" class="outline-button developer-console-button" type="button">
+                  Restart Server
                 </button>
               </article>
             </div>

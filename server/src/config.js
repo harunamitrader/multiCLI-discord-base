@@ -246,6 +246,7 @@ export function loadConfig() {
     databasePath: path.join(dataDir, "bridge.sqlite"),
     uiDir,
     codexCommand: process.env.CODEX_COMMAND || "codex",
+    codexHome,
     codexWorkdir,
     codexSearchEnabled: parseBoolean(process.env.CODEX_ENABLE_SEARCH, true),
     codexApprovalPolicy: parseOptionalString(process.env.CODEX_APPROVAL_POLICY),

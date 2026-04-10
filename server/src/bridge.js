@@ -119,6 +119,69 @@ function formatRelativeWorkdir(basePath, targetPath) {
   return relative.replaceAll("\\", "/");
 }
 
+function toTimestampMillis(value) {
+  if (!value) {
+    return null;
+  }
+
+  const millis = Date.parse(value);
+  return Number.isFinite(millis) ? millis : null;
+}
+
+function extractLastAssistantMessageFromTranscript(filePath, options = {}) {
+  const afterTimestampMillis = toTimestampMillis(options.afterTimestamp);
+  const raw = fs.readFileSync(filePath, "utf8");
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  let lastMessage = null;
+
+  for (const line of lines) {
+    let record = null;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (record?.type !== "response_item" || record.payload?.type !== "message") {
+      continue;
+    }
+
+    if (record.payload?.role !== "assistant" || !Array.isArray(record.payload?.content)) {
+      continue;
+    }
+
+    const text = record.payload.content
+      .filter((item) => item?.type === "output_text" && String(item.text || "").trim())
+      .map((item) => String(item.text || "").trim())
+      .join("\n\n")
+      .trim();
+
+    if (!text) {
+      continue;
+    }
+
+    const messageTimestamp = record.timestamp || null;
+    const messageTimestampMillis = toTimestampMillis(messageTimestamp);
+    if (
+      afterTimestampMillis != null &&
+      messageTimestampMillis != null &&
+      messageTimestampMillis < afterTimestampMillis
+    ) {
+      continue;
+    }
+
+    lastMessage = {
+      text,
+      timestamp: messageTimestamp,
+      phase: record.payload?.phase || null,
+      source: "codex_transcript",
+      filePath,
+    };
+  }
+
+  return lastMessage;
+}
+
 export class BridgeService {
   constructor({ store, bus, codex, config, attachments }) {
     this.store = store;
@@ -127,6 +190,7 @@ export class BridgeService {
     this.config = config;
     this.attachments = attachments;
     this.sessionQueues = new Map();
+    this.codexTranscriptPathCache = new Map();
     this.recoverStaleSessions();
   }
 
@@ -222,8 +286,217 @@ export class BridgeService {
     };
   }
 
+  getLastAssistantMessage(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    const transcriptMessage = this.readLastAssistantMessageFromTranscript(session.codexThreadId);
+    if (transcriptMessage) {
+      return {
+        session,
+        message: transcriptMessage,
+      };
+    }
+
+    const fallbackEvent = this.getLastAssistantMessageEvent(sessionId);
+    return {
+      session,
+      message:
+        fallbackEvent || {
+          text: "",
+          timestamp: null,
+          phase: null,
+          source: "missing",
+          filePath: null,
+        },
+    };
+  }
+
+  recoverMissingAssistantMessage(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    const latestUserMessage = this.getLastUserMessageEvent(sessionId);
+    const transcriptMessage = this.readLastAssistantMessageFromTranscript(session.codexThreadId, {
+      afterTimestamp: latestUserMessage?.timestamp || null,
+    });
+    const existingMessage = this.getLastAssistantMessageEvent(sessionId, {
+      afterTimestamp: latestUserMessage?.timestamp || null,
+    });
+    const transcriptText = String(transcriptMessage?.text || "").trim();
+    const existingText = String(existingMessage?.text || "").trim();
+
+    if (!transcriptText) {
+      return {
+        recovered: false,
+        reason: latestUserMessage ? "no_message_after_last_user" : "no_transcript_message",
+        session,
+        message: existingMessage,
+      };
+    }
+
+    if (existingText === transcriptText) {
+      return {
+        recovered: false,
+        reason: "already_imported",
+        session,
+        message: existingMessage || transcriptMessage,
+      };
+    }
+
+    const recoveredEvent = this.store.addEvent({
+      sessionId,
+      source: "codex",
+      eventType: "message.assistant",
+      payload: {
+        role: "assistant",
+        text: transcriptText,
+        isFinal: true,
+        recoveredFromTranscript: true,
+        transcriptPath: transcriptMessage.filePath || null,
+      },
+    });
+
+    this.bus.publish("message.created", recoveredEvent);
+
+    return {
+      recovered: true,
+      reason: "recovered_missing_message",
+      session: this.getSession(sessionId) || session,
+      message: {
+        text: transcriptText,
+        timestamp: recoveredEvent.createdAt || transcriptMessage.timestamp || null,
+        phase: transcriptMessage.phase || "final",
+        source: "bridge_recovered",
+        filePath: transcriptMessage.filePath || null,
+      },
+      event: recoveredEvent,
+    };
+  }
+
   findSessionByDiscordChannel(channelId) {
     return this.store.findSessionByDiscordChannel(channelId);
+  }
+
+  getLastAssistantMessageEvent(sessionId) {
+    const events = this.store.listEvents(sessionId);
+    return this.findLatestMessageEvent(events, "message.assistant");
+  }
+
+  getLastUserMessageEvent(sessionId) {
+    const events = this.store.listEvents(sessionId);
+    return this.findLatestMessageEvent(events, "message.user");
+  }
+
+  findLatestMessageEvent(events, eventType, options = {}) {
+    const afterTimestampMillis = toTimestampMillis(options.afterTimestamp);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.eventType !== eventType) {
+        continue;
+      }
+
+      const text = String(event.payload?.text || "").trim();
+      if (!text) {
+        continue;
+      }
+
+      const eventTimestamp = event.createdAt || null;
+      const eventTimestampMillis = toTimestampMillis(eventTimestamp);
+      if (
+        afterTimestampMillis != null &&
+        eventTimestampMillis != null &&
+        eventTimestampMillis < afterTimestampMillis
+      ) {
+        continue;
+      }
+
+      return {
+        text,
+        timestamp: eventTimestamp,
+        phase: event.payload?.isFinal ? "final" : null,
+        source: "bridge_event",
+        filePath: null,
+      };
+    }
+
+    return null;
+  }
+
+  readLastAssistantMessageFromTranscript(threadId, options = {}) {
+    const normalizedThreadId = normalizeSessionReference(threadId);
+    if (!normalizedThreadId) {
+      return null;
+    }
+
+    const transcriptPath = this.findTranscriptPathForThread(normalizedThreadId);
+    if (!transcriptPath) {
+      return null;
+    }
+
+    try {
+      return extractLastAssistantMessageFromTranscript(transcriptPath, options);
+    } catch {
+      this.codexTranscriptPathCache.delete(normalizedThreadId);
+      return null;
+    }
+  }
+
+  findTranscriptPathForThread(threadId) {
+    const cached = this.codexTranscriptPathCache.get(threadId);
+    if (cached && fs.existsSync(cached)) {
+      return cached;
+    }
+
+    const searchRoots = [
+      path.join(this.config.codexHome, "sessions"),
+      path.join(this.config.codexHome, "archived_sessions"),
+    ];
+
+    for (const rootDir of searchRoots) {
+      const match = this.searchTranscriptPath(rootDir, threadId);
+      if (match) {
+        this.codexTranscriptPathCache.set(threadId, match);
+        return match;
+      }
+    }
+
+    return null;
+  }
+
+  searchTranscriptPath(rootDir, threadId) {
+    if (!rootDir || !fs.existsSync(rootDir)) {
+      return null;
+    }
+
+    const stack = [rootDir];
+    while (stack.length > 0) {
+      const currentDir = stack.pop();
+      let entries = [];
+      try {
+        entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullPath);
+          continue;
+        }
+
+        if (entry.isFile() && entry.name.endsWith(".jsonl") && entry.name.includes(threadId)) {
+          return fullPath;
+        }
+      }
+    }
+
+    return null;
   }
 
   findSessionByReference(sessionReference) {
@@ -597,12 +870,58 @@ export class BridgeService {
       return { recovered: false, reason: "not_found", session: null };
     }
 
+    const recoveredMessageResult = this.recoverMissingAssistantMessage(sessionId);
+    const recoveredMessage = Boolean(recoveredMessageResult?.recovered);
+    const sessionAfterMessageRecovery = this.getSession(sessionId) || session;
     const queueState = this.getQueueState(sessionId);
     const hasActiveWork = Boolean(
       queueState.processing || queueState.activeRun || queueState.items.length > 0,
     );
-    if (!RECOVERABLE_SESSION_STATUSES.has(session.status) || hasActiveWork) {
-      return { recovered: false, reason: "not_stale", session };
+    if (hasActiveWork) {
+      return {
+        recovered: recoveredMessage,
+        reason: recoveredMessage ? "recovered_missing_message" : "not_stale",
+        session: sessionAfterMessageRecovery,
+      };
+    }
+
+    const events = this.store.listEvents(sessionId);
+    const latestStatusEvent = [...events]
+      .reverse()
+      .find((event) => event.eventType === "status.changed");
+    const latestEventStatus = latestStatusEvent?.payload?.status || null;
+
+    if (!RECOVERABLE_SESSION_STATUSES.has(session.status)) {
+      if (!latestEventStatus || latestEventStatus === session.status) {
+        return {
+          recovered: recoveredMessage,
+          reason: recoveredMessage ? "recovered_missing_message" : "not_stale",
+          session: sessionAfterMessageRecovery,
+        };
+      }
+
+      const reconciledStatusEvent = this.store.addEvent({
+        sessionId,
+        source: "system",
+        eventType: "status.changed",
+        payload: {
+          status: session.status,
+          meta: {
+            reason: "restore_chat_reconciled",
+            previousStatus: latestEventStatus,
+          },
+        },
+      });
+
+      this.bus.publish("status.changed", reconciledStatusEvent);
+
+      return {
+        recovered: true,
+        reason: recoveredMessage
+          ? "recovered_message_and_reconciled_status_history"
+          : "reconciled_status_history",
+        session: sessionAfterMessageRecovery,
+      };
     }
 
     const recoveredSession = this.store.updateSession(sessionId, {
@@ -634,7 +953,13 @@ export class BridgeService {
     this.bus.publish("status.changed", statusEvent);
     this.bus.publish("error.created", errorEvent);
 
-    return { recovered: true, reason: "recovered_after_restart", session: recoveredSession };
+    return {
+      recovered: true,
+      reason: recoveredMessage
+        ? "recovered_message_and_after_restart"
+        : "recovered_after_restart",
+      session: recoveredSession,
+    };
   }
 
   recoverStaleSessions() {
@@ -799,6 +1124,18 @@ export class BridgeService {
       }
     } finally {
       queueState.processing = false;
+
+      // A new job can arrive in the narrow window after the loop decides the
+      // queue is empty but before processing is released. Kick the queue again
+      // so stop/cancel followed by a fresh prompt cannot get stuck forever.
+      if (queueState.items.length > 0) {
+        queueMicrotask(() => {
+          this.processQueue(sessionId).catch((error) => {
+            this.publishError(sessionId, error, "system");
+            this.updateStatus(sessionId, "error", {});
+          });
+        });
+      }
     }
   }
 

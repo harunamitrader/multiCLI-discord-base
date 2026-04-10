@@ -138,6 +138,7 @@ const fastOnButton = document.querySelector("#fast-on-button");
 const fastOffButton = document.querySelector("#fast-off-button");
 const developerToolsGroup = document.querySelector("#developer-tools-group");
 const developerConsoleButton = document.querySelector("#developer-console-button");
+const restartServerButton = document.querySelector("#restart-server-button");
 const statusPill = document.querySelector("#status-pill");
 const chatLog = document.querySelector("#chat-log");
 const messageForm = document.querySelector("#message-form");
@@ -155,6 +156,7 @@ const showSchedulesButton = document.querySelector("#show-schedules-button");
 const showSettingsButton = document.querySelector("#show-settings-button");
 const deleteSessionButton = document.querySelector("#delete-session-button");
 const restoreSessionButton = document.querySelector("#restore-session-button");
+const lastAssistantMessageButton = document.querySelector("#last-assistant-message-button");
 const workdirValue = document.querySelector("#workdir-value");
 const workdirBaseNote = document.querySelector("#workdir-base-note");
 const browseWorkdirButton = document.querySelector("#browse-workdir-button");
@@ -1841,6 +1843,7 @@ function renderEmptySession() {
   }
   deleteSessionButton.disabled = true;
   restoreSessionButton.disabled = true;
+  lastAssistantMessageButton.disabled = true;
   browseWorkdirButton.disabled = true;
   changeWorkdirButton.disabled = true;
   workdirValue.textContent = formatWorkdir(null);
@@ -1880,6 +1883,7 @@ function renderScheduleDefaultsSession() {
   }
   deleteSessionButton.disabled = true;
   restoreSessionButton.disabled = true;
+  lastAssistantMessageButton.disabled = true;
   browseWorkdirButton.disabled = false;
   changeWorkdirButton.disabled = false;
   workdirValue.textContent = formatWorkdir(defaults);
@@ -1954,6 +1958,15 @@ function renderEvent(event) {
       <article class="meta-line command-line">
         <span>Running</span>
         <code>${escapeHtml(event.payload.command || "")}</code>
+      </article>
+    `;
+  }
+
+  if (event.eventType === "recovery.notice") {
+    return `
+      <article class="meta-line">
+        <span>Recovery</span>
+        <strong>${escapeHtml(event.payload.message || "")}</strong>
       </article>
     `;
   }
@@ -2120,6 +2133,7 @@ function renderActiveSession() {
   }
   deleteSessionButton.disabled = false;
   restoreSessionButton.disabled = false;
+  lastAssistantMessageButton.disabled = false;
   browseWorkdirButton.disabled = WORKING_STATUSES.has(session.status);
   changeWorkdirButton.disabled = WORKING_STATUSES.has(session.status);
   workdirValue.textContent = formatWorkdir(session);
@@ -2403,7 +2417,9 @@ async function restoreActiveSession() {
     renderSessions();
     renderActiveSession();
     subscribeEvents();
-    if (restored.recovered) {
+    if (restored.reason === "reconciled_status_history") {
+      showComposerFeedback("Reconciled the chat history with the saved session status.");
+    } else if (restored.recovered) {
       showComposerFeedback("Recovered a stale session state and reloaded the timeline.");
     }
     restoreSessionButton.textContent = "Restored";
@@ -2461,6 +2477,93 @@ async function openDeveloperConsole() {
   });
 
   showComposerFeedback(result.message || "Developer console opened.");
+}
+
+async function restartServerFromUi() {
+  const confirmed = window.confirm(
+    "Restart the CoDiCoDi server now? If it was launched via codicodi-server.cmd or scripts/start-server.cmd, it will come back automatically.",
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  restartServerButton.disabled = true;
+  const originalLabel = restartServerButton.textContent;
+  restartServerButton.textContent = "Restarting...";
+
+  try {
+    const result = await requestJson("/api/server/restart", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    showComposerFeedback(result.message || "Restart requested.");
+  } finally {
+    window.setTimeout(() => {
+      restartServerButton.disabled = false;
+      restartServerButton.textContent = originalLabel;
+    }, 3000);
+  }
+}
+
+async function showLastAssistantMessageFromUi() {
+  const session = getCurrentSession();
+  if (!session) {
+    return;
+  }
+
+  lastAssistantMessageButton.disabled = true;
+  const originalLabel = lastAssistantMessageButton.textContent;
+  lastAssistantMessageButton.textContent = "Loading...";
+
+  try {
+    const result = await requestJson(`/api/sessions/${session.id}/recover-last-assistant-message`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    upsertSession(result.session);
+    state.eventsBySession.set(session.id, result.events || []);
+    const noticeText = result.recovered
+      ? "未取り込みの AI メッセージを救出して AI Chat に追加しました。"
+      : result.reason === "already_imported"
+        ? "最後の AI メッセージはすでに取り込み済みです。"
+        : result.reason === "no_message_after_last_user"
+          ? "Codex transcript は見つかりましたが、この依頼より後の AI 返答は保存されていませんでした。"
+        : "救出できる未取り込み AI メッセージは見つかりませんでした。";
+    pushEvent(
+      result.recovered
+        ? {
+            id: `recovery-notice:${session.id}:${Date.now()}`,
+            sessionId: session.id,
+            source: "system",
+            eventType: "recovery.notice",
+            createdAt: new Date().toISOString(),
+            payload: {
+              message: noticeText,
+            },
+          }
+        : {
+            id: `recovery-message:${session.id}:${Date.now()}`,
+            sessionId: session.id,
+            source: "system",
+            eventType: "message.assistant",
+            createdAt: new Date().toISOString(),
+            payload: {
+              role: "assistant",
+              text: `[Recovery] ${noticeText}`,
+              isFinal: true,
+              recoveredNotice: true,
+            },
+          },
+    );
+    setAppView("chat");
+    renderActiveSession();
+    showComposerFeedback(noticeText);
+  } finally {
+    lastAssistantMessageButton.disabled = false;
+    lastAssistantMessageButton.textContent = originalLabel;
+  }
 }
 
 async function bindChannel(channel) {
@@ -2935,6 +3038,16 @@ restoreSessionButton.addEventListener("click", async () => {
   }
 });
 
+lastAssistantMessageButton.addEventListener("click", async () => {
+  try {
+    await showLastAssistantMessageFromUi();
+  } catch (error) {
+    lastAssistantMessageButton.disabled = false;
+    lastAssistantMessageButton.textContent = "Recover AI Message";
+    alert(error.message);
+  }
+});
+
 changeWorkdirButton.addEventListener("click", async () => {
   try {
     await openWorkdirPicker();
@@ -3017,6 +3130,16 @@ developerConsoleButton.addEventListener("click", async () => {
   try {
     await openDeveloperConsole();
   } catch (error) {
+    alert(error.message);
+  }
+});
+
+restartServerButton?.addEventListener("click", async () => {
+  try {
+    await restartServerFromUi();
+  } catch (error) {
+    restartServerButton.disabled = false;
+    restartServerButton.textContent = "Restart Server";
     alert(error.message);
   }
 });

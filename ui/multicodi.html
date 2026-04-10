@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>multicodi</title>
+    <link rel="stylesheet" href="/multicodi.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- Sidebar: Agent list -->
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>multicodi</h1>
+          <div id="workspace-selector" class="workspace-selector">
+            <div class="workspace-row">
+              <select id="workspace-select" title="ワークスペース切り替え">
+                <option value="default">default</option>
+              </select>
+              <button id="btn-workspace-add" class="btn-icon" title="新しいワークスペース">＋</button>
+              <button id="btn-workspace-del" class="btn-icon btn-icon-danger" title="このワークスペースを削除">－</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="agent-list" id="agent-list">
+          <!-- Agent items rendered by JS -->
+          <p class="loading-note">読み込み中…</p>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="btn-outline" id="btn-stop-all">⏹ 全停止</button>
+        </div>
+      </aside>
+
+      <!-- Main pane -->
+      <main class="main-panel">
+        <header class="main-header">
+          <div id="selected-agent-name" class="selected-agent-name">エージェントを選択</div>
+          <div class="tab-bar">
+            <button class="tab-btn active" data-tab="chat">💬 Chat</button>
+            <button class="tab-btn" data-tab="terminal">🖥 Terminal</button>
+          </div>
+        </header>
+
+        <!-- Chat tab -->
+        <section class="tab-panel active" id="tab-chat">
+          <div class="chat-log" id="chat-log"></div>
+          <div class="chat-input-bar">
+            <textarea
+              id="chat-input"
+              class="chat-input"
+              placeholder="メッセージを入力… (Enter で送信、Shift+Enter で改行)"
+              rows="1"
+            ></textarea>
+            <button class="btn-send" id="btn-send">Send</button>
+          </div>
+        </section>
+
+        <!-- Terminal tab (placeholder — Phase 5 で node-pty 接続) -->
+        <section class="tab-panel" id="tab-terminal">
+          <div class="terminal-placeholder">
+            <p>🖥 Terminal view は Phase 5 で実装予定です。</p>
+            <p>現在は Chat タブからエージェントを操作できます。</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/multicodi.js" type="module"></script>
+  </body>
+</html>

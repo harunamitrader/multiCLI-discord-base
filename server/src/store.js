@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
 
-function parseSession(row) {
-  if (!row) {
-    return null;
-  }
+// ---------------------------------------------------------------------------
+// Parsers
+// ---------------------------------------------------------------------------
 
+function parseSession(row) {
+  if (!row) return null;
   return {
     id: row.id,
     title: row.title,
+    // Legacy field — kept for backward compat with codicodi bridge
     codexThreadId: row.codex_thread_id,
+    // Generalized session reference (all providers)
+    providerSessionRef: row.provider_session_ref ?? row.codex_thread_id ?? null,
     status: row.status,
     discordChannelId: row.discord_channel_id,
     discordChannelName: row.discord_channel_name,
@@ -25,10 +29,7 @@ function parseSession(row) {
 }
 
 function parseEvent(row) {
-  if (!row) {
-    return null;
-  }
-
+  if (!row) return null;
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -39,9 +40,81 @@ function parseEvent(row) {
   };
 }
 
+function parseAgent(row) {
+  if (!row) return null;
+  return {
+    name: row.name,
+    type: row.type,
+    model: row.model,
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+function parseWorkspace(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    workdir: row.workdir,
+    isActive: Boolean(row.is_active),
+    createdAt: row.created_at,
+  };
+}
+
+function parseAgentSession(row) {
+  if (!row) return null;
+  return {
+    agentName: row.agent_name,
+    workspaceId: row.workspace_id,
+    providerSessionRef: row.provider_session_ref,
+    model: row.model,
+    workdir: row.workdir,
+    lastRunState: row.last_run_state,
+    updatedAt: row.updated_at,
+  };
+}
+
+function parseRun(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    agentName: row.agent_name,
+    workspaceId: row.workspace_id,
+    prompt: row.prompt,
+    status: row.status,
+    source: row.source,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    costUsd: row.cost_usd,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function parseMessage(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    agentName: row.agent_name,
+    workspaceId: row.workspace_id,
+    runId: row.run_id,
+    role: row.role,
+    content: row.content,
+    metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    source: row.source,
+    createdAt: row.created_at,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
+
 export class Store {
   constructor(db) {
     this.db = db;
+
     const sessionSelectColumns = `
       sessions.*,
       (
@@ -52,98 +125,147 @@ export class Store {
           AND session_events.source IN ('ui', 'discord')
       ) AS user_prompt_count
     `;
+
+    // ---- Legacy session statements (codicodi互換) ----
     this.createSessionStatement = db.prepare(`
       INSERT INTO sessions (
-        id,
-        title,
-        codex_thread_id,
-        status,
-        discord_channel_id,
-        discord_channel_name,
-        model,
-        model_reasoning_effort,
-        profile,
-        workdir,
-        service_tier,
-        created_at,
-        updated_at
+        id, title, codex_thread_id, status,
+        discord_channel_id, discord_channel_name,
+        model, model_reasoning_effort, profile, workdir, service_tier,
+        created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.updateSessionStatement = db.prepare(`
       UPDATE sessions
-      SET
-        title = ?,
-        codex_thread_id = ?,
-        status = ?,
-        discord_channel_id = ?,
-        discord_channel_name = ?,
-        model = ?,
-        model_reasoning_effort = ?,
-        profile = ?,
-        workdir = ?,
-        service_tier = ?,
-        updated_at = ?
-      WHERE id = ?
+      SET title=?, codex_thread_id=?, provider_session_ref=?, status=?,
+          discord_channel_id=?, discord_channel_name=?,
+          model=?, model_reasoning_effort=?, profile=?, workdir=?, service_tier=?,
+          updated_at=?
+      WHERE id=?
     `);
-    this.getSessionStatement = db.prepare(`
-      SELECT ${sessionSelectColumns}
-      FROM sessions
-      WHERE id = ?
-    `);
-    this.listSessionsStatement = db.prepare(`
-      SELECT ${sessionSelectColumns}
-      FROM sessions
-      ORDER BY updated_at DESC
-    `);
-    this.findByDiscordChannelStatement = db.prepare(`
-      SELECT ${sessionSelectColumns}
-      FROM sessions
-      WHERE discord_channel_id = ?
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `);
-    this.listByDiscordChannelStatement = db.prepare(`
-      SELECT ${sessionSelectColumns}
-      FROM sessions
-      WHERE discord_channel_id = ?
-      ORDER BY updated_at DESC
-    `);
-    this.deleteSessionEventsStatement = db.prepare(`
-      DELETE FROM session_events WHERE session_id = ?
-    `);
-    this.deleteSessionStatement = db.prepare(`
-      DELETE FROM sessions WHERE id = ?
-    `);
-    this.insertEventStatement = db.prepare(`
-      INSERT INTO session_events (id, session_id, source, event_type, payload_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+    this.getSessionStatement = db.prepare(
+      `SELECT ${sessionSelectColumns} FROM sessions WHERE id=?`
+    );
+    this.listSessionsStatement = db.prepare(
+      `SELECT ${sessionSelectColumns} FROM sessions ORDER BY updated_at DESC`
+    );
+    this.findByDiscordChannelStatement = db.prepare(
+      `SELECT ${sessionSelectColumns} FROM sessions WHERE discord_channel_id=? ORDER BY updated_at DESC LIMIT 1`
+    );
+    this.listByDiscordChannelStatement = db.prepare(
+      `SELECT ${sessionSelectColumns} FROM sessions WHERE discord_channel_id=? ORDER BY updated_at DESC`
+    );
+    this.deleteSessionEventsStatement = db.prepare(
+      `DELETE FROM session_events WHERE session_id=?`
+    );
+    this.deleteSessionStatement = db.prepare(`DELETE FROM sessions WHERE id=?`);
+    this.insertEventStatement = db.prepare(
+      `INSERT INTO session_events (id, session_id, source, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+    );
     this.listEventsStatement = db.prepare(`
       SELECT * FROM (
-        SELECT * FROM session_events
-        WHERE session_id = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-      )
-      ORDER BY created_at ASC
+        SELECT * FROM session_events WHERE session_id=? ORDER BY created_at DESC LIMIT ?
+      ) ORDER BY created_at ASC
     `);
+
+    // ---- Agent statements ----
+    this.upsertAgentStatement = db.prepare(`
+      INSERT INTO agents (name, type, model, status, created_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(name) DO UPDATE SET type=excluded.type, model=excluded.model
+    `);
+    this.updateAgentStatusStatement = db.prepare(
+      `UPDATE agents SET status=? WHERE name=?`
+    );
+    this.getAgentStatement = db.prepare(`SELECT * FROM agents WHERE name=?`);
+    this.listAgentsStatement = db.prepare(`SELECT * FROM agents ORDER BY name`);
+
+    // ---- Workspace statements ----
+    this.insertWorkspaceStatement = db.prepare(`
+      INSERT INTO workspaces (id, name, workdir, is_active, created_at)
+      VALUES (?, ?, ?, 0, datetime('now'))
+    `);
+    this.getWorkspaceStatement = db.prepare(`SELECT * FROM workspaces WHERE id=?`);
+    this.getWorkspaceByNameStatement = db.prepare(`SELECT * FROM workspaces WHERE name=?`);
+    this.listWorkspacesStatement = db.prepare(`SELECT * FROM workspaces ORDER BY name`);
+    this.getActiveWorkspaceStatement = db.prepare(
+      `SELECT * FROM workspaces WHERE is_active=1 LIMIT 1`
+    );
+    this.setActiveWorkspaceStatement = db.prepare(
+      `UPDATE workspaces SET is_active=CASE WHEN id=? THEN 1 ELSE 0 END`
+    );
+    this.updateWorkspaceStatement = db.prepare(
+      `UPDATE workspaces SET name=?, workdir=? WHERE id=?`
+    );
+    this.deleteWorkspaceStatement = db.prepare(`DELETE FROM workspaces WHERE id=?`);
+
+    // ---- AgentSession statements ----
+    this.upsertAgentSessionStatement = db.prepare(`
+      INSERT INTO agent_sessions (agent_name, workspace_id, provider_session_ref, model, workdir, last_run_state, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(agent_name, workspace_id) DO UPDATE SET
+        provider_session_ref=excluded.provider_session_ref,
+        model=COALESCE(excluded.model, model),
+        workdir=COALESCE(excluded.workdir, workdir),
+        last_run_state=COALESCE(excluded.last_run_state, last_run_state),
+        updated_at=excluded.updated_at
+    `);
+    this.getAgentSessionStatement = db.prepare(
+      `SELECT * FROM agent_sessions WHERE agent_name=? AND workspace_id=?`
+    );
+    this.listAgentSessionsByWorkspaceStatement = db.prepare(
+      `SELECT * FROM agent_sessions WHERE workspace_id=?`
+    );
+
+    // ---- Run statements ----
+    this.insertRunStatement = db.prepare(`
+      INSERT INTO runs (id, agent_name, workspace_id, prompt, status, source, started_at)
+      VALUES (?, ?, ?, ?, 'running', ?, datetime('now'))
+    `);
+    this.completeRunStatement = db.prepare(`
+      UPDATE runs SET status=?, input_tokens=?, output_tokens=?, cost_usd=?, completed_at=datetime('now')
+      WHERE id=?
+    `);
+    this.getRunStatement = db.prepare(`SELECT * FROM runs WHERE id=?`);
+    this.listRunsStatement = db.prepare(
+      `SELECT * FROM runs WHERE agent_name=? AND workspace_id=? ORDER BY started_at DESC LIMIT ?`
+    );
+
+    // ---- Message statements ----
+    this.insertMessageStatement = db.prepare(`
+      INSERT INTO messages (agent_name, workspace_id, run_id, role, content, metadata, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    this.listMessagesStatement = db.prepare(`
+      SELECT * FROM (
+        SELECT * FROM messages WHERE agent_name=? AND workspace_id=? ORDER BY created_at DESC LIMIT ?
+      ) ORDER BY created_at ASC
+    `);
+
+    // ---- Discord binding statements ----
+    this.upsertDiscordBindingStatement = db.prepare(`
+      INSERT INTO workspace_discord_bindings (discord_channel_id, workspace_id, default_agent, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(discord_channel_id) DO UPDATE SET
+        workspace_id=excluded.workspace_id,
+        default_agent=COALESCE(excluded.default_agent, default_agent)
+    `);
+    this.getDiscordBindingStatement = db.prepare(
+      `SELECT * FROM workspace_discord_bindings WHERE discord_channel_id=?`
+    );
   }
 
-  createSession({
-    title,
-    discordChannelId = null,
-    discordChannelName = null,
-    model,
-    reasoningEffort,
-    profile,
-    workdir,
-    serviceTier,
-  }) {
+  // ---------------------------------------------------------------------------
+  // Legacy session methods (codicodi互換 — bridge.js が使う)
+  // ---------------------------------------------------------------------------
+
+  createSession({ title, discordChannelId = null, discordChannelName = null, model, reasoningEffort, profile, workdir, serviceTier }) {
     const now = new Date().toISOString();
     const session = {
       id: randomUUID(),
       title: title || "Untitled session",
       codexThreadId: null,
+      providerSessionRef: null,
       status: "idle",
       discordChannelId,
       discordChannelName,
@@ -157,23 +279,12 @@ export class Store {
       createdAt: now,
       updatedAt: now,
     };
-
     this.createSessionStatement.run(
-      session.id,
-      session.title,
-      session.codexThreadId,
-      session.status,
-      session.discordChannelId,
-      session.discordChannelName,
-      session.model,
-      session.reasoningEffort,
-      session.profile,
-      session.workdir,
-      session.serviceTier,
-      session.createdAt,
-      session.updatedAt,
+      session.id, session.title, session.codexThreadId, session.status,
+      session.discordChannelId, session.discordChannelName,
+      session.model, session.reasoningEffort, session.profile, session.workdir, session.serviceTier,
+      session.createdAt, session.updatedAt,
     );
-
     return session;
   }
 
@@ -187,23 +298,19 @@ export class Store {
 
   updateSession(sessionId, patch) {
     const current = this.getSession(sessionId);
-    if (!current) {
-      return null;
-    }
+    if (!current) return null;
 
     const next = {
       ...current,
       ...patch,
-      fastMode:
-        patch.serviceTier != null
-          ? patch.serviceTier === "fast"
-          : current.serviceTier === "fast",
+      fastMode: patch.serviceTier != null ? patch.serviceTier === "fast" : current.serviceTier === "fast",
       updatedAt: new Date().toISOString(),
     };
 
     this.updateSessionStatement.run(
       next.title,
       next.codexThreadId,
+      next.providerSessionRef ?? next.codexThreadId,
       next.status,
       next.discordChannelId,
       next.discordChannelName,
@@ -215,15 +322,11 @@ export class Store {
       next.updatedAt,
       next.id,
     );
-
     return next;
   }
 
   bindDiscordChannel(sessionId, channelId, channelName = null) {
-    return this.updateSession(sessionId, {
-      discordChannelId: channelId,
-      discordChannelName: channelName,
-    });
+    return this.updateSession(sessionId, { discordChannelId: channelId, discordChannelName: channelName });
   }
 
   findSessionByDiscordChannel(channelId) {
@@ -236,10 +339,7 @@ export class Store {
 
   deleteSession(sessionId) {
     const session = this.getSession(sessionId);
-    if (!session) {
-      return null;
-    }
-
+    if (!session) return null;
     this.deleteSessionEventsStatement.run(sessionId);
     this.deleteSessionStatement.run(sessionId);
     return session;
@@ -254,20 +354,154 @@ export class Store {
       payload,
       createdAt: new Date().toISOString(),
     };
-
     this.insertEventStatement.run(
-      event.id,
-      event.sessionId,
-      event.source,
-      event.eventType,
-      JSON.stringify(event.payload),
-      event.createdAt,
+      event.id, event.sessionId, event.source, event.eventType,
+      JSON.stringify(event.payload), event.createdAt,
     );
-
     return event;
   }
 
   listEvents(sessionId, limit = 200) {
     return this.listEventsStatement.all(sessionId, limit).map(parseEvent);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent methods
+  // ---------------------------------------------------------------------------
+
+  upsertAgent({ name, type, model }) {
+    this.upsertAgentStatement.run(name, type, model ?? null, "stopped");
+    return parseAgent(this.getAgentStatement.get(name));
+  }
+
+  updateAgentStatus(name, status) {
+    this.updateAgentStatusStatement.run(status, name);
+  }
+
+  getAgent(name) {
+    return parseAgent(this.getAgentStatement.get(name));
+  }
+
+  listAgents() {
+    return this.listAgentsStatement.all().map(parseAgent);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workspace methods
+  // ---------------------------------------------------------------------------
+
+  createWorkspace({ id, name, workdir }) {
+    this.insertWorkspaceStatement.run(id ?? randomUUID(), name, workdir ?? null);
+    return parseWorkspace(this.getWorkspaceByNameStatement.get(name));
+  }
+
+  getWorkspace(id) {
+    return parseWorkspace(this.getWorkspaceStatement.get(id));
+  }
+
+  getWorkspaceByName(name) {
+    return parseWorkspace(this.getWorkspaceByNameStatement.get(name));
+  }
+
+  getActiveWorkspace() {
+    return parseWorkspace(this.getActiveWorkspaceStatement.get());
+  }
+
+  listWorkspaces() {
+    return this.listWorkspacesStatement.all().map(parseWorkspace);
+  }
+
+  setActiveWorkspace(id) {
+    this.setActiveWorkspaceStatement.run(id);
+    return this.getWorkspace(id);
+  }
+
+  updateWorkspace(id, { name, workdir }) {
+    const ws = this.getWorkspace(id);
+    if (!ws) return null;
+    this.updateWorkspaceStatement.run(name ?? ws.name, workdir ?? ws.workdir, id);
+    return this.getWorkspace(id);
+  }
+
+  deleteWorkspace(id) {
+    const ws = this.getWorkspace(id);
+    if (!ws) return null;
+    this.deleteWorkspaceStatement.run(id);
+    return ws;
+  }
+
+  // ---------------------------------------------------------------------------
+  // AgentSession methods
+  // ---------------------------------------------------------------------------
+
+  upsertAgentSession({ agentName, workspaceId, providerSessionRef, model, workdir, lastRunState }) {
+    this.upsertAgentSessionStatement.run(
+      agentName, workspaceId, providerSessionRef ?? null,
+      model ?? null, workdir ?? null, lastRunState ?? null,
+    );
+    return parseAgentSession(this.getAgentSessionStatement.get(agentName, workspaceId));
+  }
+
+  getAgentSession(agentName, workspaceId) {
+    return parseAgentSession(this.getAgentSessionStatement.get(agentName, workspaceId));
+  }
+
+  listAgentSessionsByWorkspace(workspaceId) {
+    return this.listAgentSessionsByWorkspaceStatement.all(workspaceId).map(parseAgentSession);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Run methods
+  // ---------------------------------------------------------------------------
+
+  startRun({ agentName, workspaceId, prompt, source }) {
+    const id = randomUUID();
+    this.insertRunStatement.run(id, agentName, workspaceId, prompt ?? null, source ?? null);
+    return parseRun(this.getRunStatement.get(id));
+  }
+
+  completeRun(id, { status, inputTokens, outputTokens, costUsd }) {
+    this.completeRunStatement.run(
+      status ?? "completed",
+      inputTokens ?? null,
+      outputTokens ?? null,
+      costUsd ?? null,
+      id,
+    );
+    return parseRun(this.getRunStatement.get(id));
+  }
+
+  listRuns(agentName, workspaceId, limit = 50) {
+    return this.listRunsStatement.all(agentName, workspaceId, limit).map(parseRun);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Message methods
+  // ---------------------------------------------------------------------------
+
+  addMessage({ agentName, workspaceId, runId, role, content, metadata, source }) {
+    this.insertMessageStatement.run(
+      agentName, workspaceId, runId ?? null, role,
+      content ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+      source ?? null,
+    );
+  }
+
+  listMessages(agentName, workspaceId, limit = 200) {
+    return this.listMessagesStatement.all(agentName, workspaceId, limit).map(parseMessage);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Discord binding methods
+  // ---------------------------------------------------------------------------
+
+  upsertDiscordBinding({ discordChannelId, workspaceId, defaultAgent }) {
+    this.upsertDiscordBindingStatement.run(discordChannelId, workspaceId, defaultAgent ?? null);
+    return this.getDiscordBindingStatement.get(discordChannelId);
+  }
+
+  getDiscordBinding(discordChannelId) {
+    return this.getDiscordBindingStatement.get(discordChannelId);
   }
 }

@@ -110,6 +110,16 @@ function buildSessionCommand() {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("last-message")
+        .setDescription("Recover the last missing AI message for the current session."),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("restart")
+        .setDescription("Restart the CoDiCoDi server."),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("help")
         .setDescription("Show CoDiCoDi commands and examples."),
     );
@@ -221,12 +231,58 @@ function formatScheduledInputMessage(payload) {
   return lines.join("\n");
 }
 
+/**
+ * Parse a "?" agent command from Discord message content.
+ *
+ * Patterns:
+ *   "hanako? <prompt>"  → { agent: "hanako", verb: null,      prompt: "<prompt>" }
+ *   "hanako?"           → { agent: "hanako", verb: null,      prompt: "" }
+ *   "hanako new?"       → { agent: "hanako", verb: "new",     prompt: null }
+ *   "hanako stop?"      → { agent: "hanako", verb: "stop",    prompt: null }
+ *   "stop?"             → { agent: null,     verb: "stop",    prompt: null }
+ *   "agents?"           → { agent: null,     verb: "agents",  prompt: null }
+ *
+ * Returns null if no pattern matches.
+ */
+function parseAgentCommand(content, agentNames) {
+  const trimmed = content.trim();
+
+  // Global commands: "stop?" / "agents?" / "workspace?" / "workspace? <name>"
+  if (/^stop\?$/i.test(trimmed)) return { agent: null, verb: "stop", prompt: null };
+  if (/^agents?\?$/i.test(trimmed)) return { agent: null, verb: "agents", prompt: null };
+  const wsMatch = trimmed.match(/^workspace\?\s*([\s\S]*)$/i);
+  if (wsMatch) return { agent: null, verb: "workspace", prompt: wsMatch[1].trim() };
+
+  // "hanako new?" / "hanako stop?" — verb before ?
+  const verbMatch = trimmed.match(/^(\S+)\s+(new|stop|reset)\?$/i);
+  if (verbMatch) {
+    const name = verbMatch[1].toLowerCase();
+    if (agentNames.includes(name)) {
+      return { agent: name, verb: verbMatch[2].toLowerCase(), prompt: null };
+    }
+  }
+
+  // "hanako? <prompt>" or "hanako?" — name immediately before ?
+  const promptMatch = trimmed.match(/^(\S+)\?\s*([\s\S]*)$/);
+  if (promptMatch) {
+    const name = promptMatch[1].toLowerCase();
+    if (agentNames.includes(name)) {
+      return { agent: name, verb: null, prompt: promptMatch[2].trim() };
+    }
+  }
+
+  return null;
+}
+
 export class DiscordAdapter {
-  constructor({ bridge, bus, config, attachments }) {
+  constructor({ bridge, agentBridge, bus, config, attachments, restartServer, agentRegistry }) {
     this.bridge = bridge;
+    this.agentBridge = agentBridge || null;
     this.bus = bus;
     this.config = config;
     this.attachments = attachments;
+    this.restartServer = restartServer;
+    this.agentRegistry = agentRegistry || null;
     this.client = null;
     this.unsubscribers = [];
     this.progressTrackers = new Map();
@@ -291,15 +347,17 @@ export class DiscordAdapter {
 
     this.unsubscribers.push(
       this.bus.on("session.updated", (session) => {
-        this.syncDiscordChannelNameForSession(session).catch((error) => {
-          console.error("Discord channel name sync failed:", error);
+        this.handleSessionUpdated(session).catch((error) => {
+          console.error("Discord session update handling failed:", error);
         });
       }),
     );
 
     this.unsubscribers.push(
       this.bus.on("session.deleted", ({ sessionId }) => {
-        this.stopProgressTracker(sessionId);
+        this.discardProgressTracker(sessionId, { deleteMessage: true }).catch((error) => {
+          console.error("Discord progress tracker cleanup failed:", error);
+        });
       }),
     );
 
@@ -507,6 +565,49 @@ export class DiscordAdapter {
     this.progressTrackers.delete(sessionId);
   }
 
+  async discardProgressTracker(sessionId, { deleteMessage = false } = {}) {
+    const tracker = this.progressTrackers.get(sessionId);
+    if (!tracker) {
+      return null;
+    }
+
+    this.stopProgressTracker(sessionId);
+
+    if (deleteMessage && tracker.channel && tracker.messageId) {
+      const message = await tracker.channel.messages.fetch(tracker.messageId).catch(() => null);
+      if (message) {
+        await message.delete().catch(() => null);
+      }
+    }
+
+    return tracker;
+  }
+
+  async handleSessionUpdated(session) {
+    const tracker = session ? this.progressTrackers.get(session.id) : null;
+    const nextChannelId = session?.discordChannelId || null;
+    const trackerChannelId = tracker?.channel?.id || null;
+    const shouldResetTracker = Boolean(tracker && trackerChannelId !== nextChannelId);
+    const trackerStartedAt = tracker?.startedAt || session?.updatedAt || new Date().toISOString();
+
+    if (shouldResetTracker) {
+      await this.discardProgressTracker(session.id, { deleteMessage: true });
+    }
+
+    await this.syncDiscordChannelNameForSession(session);
+
+    if (
+      shouldResetTracker &&
+      nextChannelId &&
+      this.config.discordStatusUpdates &&
+      WORKING_STATUSES.has(session.status)
+    ) {
+      await this.startProgressTracker(session, {
+        createdAt: trackerStartedAt,
+      });
+    }
+  }
+
   markProgressTrackerHasTrailingMessages(sessionId) {
     const tracker = this.progressTrackers.get(sessionId);
     if (!tracker?.messageId) {
@@ -707,6 +808,16 @@ export class DiscordAdapter {
 
     if (subcommand === "stop") {
       await this.handleStopSlashCommand(interaction);
+      return;
+    }
+
+    if (subcommand === "last-message") {
+      await this.handleLastMessageSlashCommand(interaction);
+      return;
+    }
+
+    if (subcommand === "restart") {
+      await this.handleRestartSlashCommand(interaction);
       return;
     }
 
@@ -987,6 +1098,74 @@ export class DiscordAdapter {
     });
   }
 
+  async handleRestartSlashCommand(interaction) {
+    if (typeof this.restartServer !== "function") {
+      await interaction.reply({
+        content: "Server restart is not available in this deployment.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.reply({
+      content:
+        "Restarting the CoDiCoDi server now. If it was launched via codicodi-server.cmd or scripts/start-server.cmd, it will come back automatically.",
+      ephemeral: true,
+    });
+
+    try {
+      await this.restartServer({
+        requestedBy: interaction.user?.tag || interaction.user?.id || "unknown",
+        source: "discord",
+      });
+    } catch (error) {
+      console.error("Discord restart command failed:", error);
+      await interaction.followUp({
+        content: `Restart failed: ${error instanceof Error ? error.message : String(error)}`,
+        ephemeral: true,
+      }).catch(() => null);
+    }
+  }
+
+  async handleLastMessageSlashCommand(interaction) {
+    const session = this.getLinkedSession(interaction.channelId);
+    if (!session) {
+      await interaction.reply({
+        content: "No session is linked to this channel yet.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const result = this.bridge.recoverMissingAssistantMessage(session.id);
+    const text = String(result?.message?.text || "").trim();
+    if (!text) {
+      await interaction.reply({
+        content: "No recoverable assistant message was found for this session.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const prefix =
+      result?.recovered
+        ? `Recovered the last missing AI message for \`${session.title}\`:\n`
+        : `The latest AI message for \`${session.title}\` was already imported:\n`;
+    const header = prefix;
+    const chunks = splitMessage(text, 1800 - header.length);
+    await interaction.reply({
+      content: `${header}${chunks[0]}`,
+      ephemeral: true,
+    });
+
+    for (const chunk of chunks.slice(1)) {
+      await interaction.followUp({
+        content: chunk,
+        ephemeral: true,
+      });
+    }
+  }
+
   async handleHelpSlashCommand(interaction) {
     await interaction.reply({
       content:
@@ -1005,6 +1184,8 @@ export class DiscordAdapter {
           "/codex fast on - Enable fast mode",
           "/codex fast off - Disable fast mode",
           "/codex stop - Stop the current generation",
+          "/codex last-message - Recover the last missing AI message for this session",
+          "/codex restart - Restart the CoDiCoDi server",
           "",
           "Legacy text commands:",
           "!status - Show the linked session status",
@@ -1014,6 +1195,162 @@ export class DiscordAdapter {
       ephemeral: true,
     });
   }
+
+  // ── Multi-agent command handler ───────────────────────────────────────────
+
+  async handleAgentCommand(message, cmd) {
+    const { agent: agentName, verb, prompt } = cmd;
+    const registry = this.agentRegistry;
+    const ab = this.agentBridge;
+
+    // Global: "workspace?" — show or set channel↔workspace binding
+    if (!agentName && verb === "workspace") {
+      if (!ab) {
+        await message.reply("AgentBridge が利用できません。");
+        return;
+      }
+      const channelId = message.channelId;
+
+      if (!prompt) {
+        // Show current binding
+        const binding = ab.getDiscordBinding(channelId);
+        const ws = binding ? (ab.getWorkspace ? ab.store?.getWorkspace(binding.workspaceId) : null) : null;
+        const wsName = ws?.name ?? binding?.workspaceId ?? "なし";
+        const agentHint = binding?.defaultAgent ? ` (デフォルトエージェント: ${binding.defaultAgent})` : "";
+        const workspaces = ab.listWorkspaces().map((w) => `• ${w.name}${w.isActive ? " ✓" : ""}`).join("\n");
+        await message.reply(
+          `**このチャンネルのワークスペース:** ${wsName}${agentHint}\n\n` +
+          `**利用可能なワークスペース:**\n${workspaces}\n\n` +
+          `変更するには: \`workspace? <名前>\``
+        );
+        return;
+      }
+
+      // Bind to workspace by name (create if not exists)
+      let workspace = ab.getWorkspaceByName(prompt);
+      if (!workspace) {
+        workspace = ab.createWorkspace({ name: prompt });
+      }
+      ab.bindDiscordChannel({ discordChannelId: channelId, workspaceId: workspace.id });
+      await message.reply(`✅ このチャンネルをワークスペース **${workspace.name}** に紐づけました。`);
+      return;
+    }
+
+    // Global: "stop?" — stop all agents
+    if (!agentName && verb === "stop") {
+      ab ? ab.stopAll() : registry.stopAll();
+      await message.reply("⏹ 全エージェントを停止しました。");
+      return;
+    }
+
+    // Global: "agents?" — list all agents
+    if (!agentName && verb === "agents") {
+      await message.reply(registry.formatList());
+      return;
+    }
+
+    const agent = registry.get(agentName);
+    if (!agent) {
+      await message.reply(`エージェント \`${agentName}\` が見つかりません。\n\n${registry.formatList()}`);
+      return;
+    }
+
+    // "hanako stop?" — stop agent
+    if (verb === "stop") {
+      ab ? ab.cancelAgent(agentName) : agent.cancel();
+      await message.reply(`⏹ ${agentName} を停止しました。`);
+      return;
+    }
+
+    // "hanako new?" / "hanako reset?" — reset session
+    if (verb === "new" || verb === "reset") {
+      ab ? ab.resetAgentSession(agentName) : agent.resetSession();
+      await message.reply(`🆕 ${agentName} のセッションをリセットしました。`);
+      return;
+    }
+
+    // "hanako?" (no prompt) — show status
+    if (!prompt) {
+      await message.reply(agent.getStatusLine());
+      return;
+    }
+
+    // "hanako? <prompt>" — run prompt via AgentBridge (with CanonicalEvents)
+    // Resolve workspace from Discord channel binding
+    const channelId = message.channelId;
+    let workspaceId = "default";
+    if (ab) {
+      const binding = ab.getDiscordBinding(channelId);
+      if (binding?.workspaceId) workspaceId = binding.workspaceId;
+    }
+
+    const statusMsg = await message.reply(`> 🤔 ${agentName} thinking…`).catch(() => null);
+    const startedAt = Date.now();
+
+    // Track last tool name for live progress edits
+    let lastProgressEdit = Date.now();
+
+    const onProgress = statusMsg
+      ? async (event) => {
+          if (event.type === "tool.start") {
+            const now = Date.now();
+            // Throttle edits to max once per 2s to avoid rate limits
+            if (now - lastProgressEdit < 2000) return;
+            lastProgressEdit = now;
+            await statusMsg
+              .edit(`> 🔧 ${agentName}: \`${event.toolName}\` 実行中…`)
+              .catch(() => null);
+          }
+        }
+      : null;
+
+    try {
+      const workdir = this.config.codexWorkdir;
+
+      // Use AgentBridge if available, fall back to direct agent.run()
+      let result;
+      if (ab) {
+        result = await ab.runPrompt({
+          agentName,
+          prompt,
+          workspaceId,
+          workdir,
+          source: "discord",
+          discordMessageId: message.id,
+          onProgress,
+        });
+      } else {
+        const raw = await agent.run({ prompt, workdir });
+        result = { text: raw.text, usage: raw.usage };
+      }
+
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+
+      const { formatUsage } = await import("./pricing.js");
+      const usageLine = formatUsage(agent.model || agent.adapter?.defaultModel || "", result.usage);
+
+      const parts = [];
+      if (result.text) parts.push(result.text);
+      parts.push(`\n> ✅ ${agentName} 完了 (${elapsed}s)${usageLine ? `\n> 📊 ${usageLine}` : ""}`);
+
+      const replyText = parts.join("\n");
+      const chunks = splitMessage(replyText, 1900);
+      if (statusMsg) await statusMsg.delete().catch(() => null);
+      for (const chunk of chunks) {
+        await message.channel.send(chunk).catch(() => null);
+      }
+    } catch (err) {
+      if (err.cancelled) {
+        if (statusMsg) await statusMsg.edit(`> ⏹ ${agentName} キャンセルされました。`).catch(() => null);
+        return;
+      }
+      const errText = `> ❌ ${agentName} エラー: ${err.message}`;
+      if (statusMsg) await statusMsg.edit(errText).catch(() => null);
+      else await message.reply(errText).catch(() => null);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   async handleMessage(message) {
     if (!this.isAllowedMessage(message)) {
@@ -1025,6 +1362,17 @@ export class DiscordAdapter {
     if (!content && rawAttachments.length === 0) {
       return;
     }
+
+    // ── Multi-agent "?" command handling ──────────────────────────────────
+    if (this.agentRegistry?.hasAgents()) {
+      const agentNames = this.agentRegistry.names();
+      const cmd = parseAgentCommand(content, agentNames);
+      if (cmd) {
+        await this.handleAgentCommand(message, cmd);
+        return;
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     if (content === "!status") {
       const session = this.getLinkedSession(message.channelId);
