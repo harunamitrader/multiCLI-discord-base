@@ -107,6 +107,16 @@ function parseMessage(row) {
   };
 }
 
+function parseDiscordBinding(row) {
+  if (!row) return null;
+  return {
+    discordChannelId: row.discord_channel_id,
+    workspaceId: row.workspace_id,
+    defaultAgent: row.default_agent ?? null,
+    createdAt: row.created_at,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -253,8 +263,8 @@ export class Store {
     `);
     this.listMessagesStatement = db.prepare(`
       SELECT * FROM (
-        SELECT * FROM messages WHERE agent_name=? AND workspace_id=? ORDER BY created_at DESC LIMIT ?
-      ) ORDER BY created_at ASC
+        SELECT rowid, * FROM messages WHERE agent_name=? AND workspace_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?
+      ) ORDER BY created_at ASC, rowid ASC
     `);
 
     // ---- Discord binding statements ----
@@ -533,10 +543,10 @@ export class Store {
 
   upsertDiscordBinding({ discordChannelId, workspaceId, defaultAgent }) {
     this.upsertDiscordBindingStatement.run(discordChannelId, workspaceId, defaultAgent ?? null);
-    return this.getDiscordBindingStatement.get(discordChannelId);
+    return parseDiscordBinding(this.getDiscordBindingStatement.get(discordChannelId));
   }
 
   getDiscordBinding(discordChannelId) {
-    return this.getDiscordBindingStatement.get(discordChannelId);
+    return parseDiscordBinding(this.getDiscordBindingStatement.get(discordChannelId));
   }
 }
