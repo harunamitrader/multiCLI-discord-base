@@ -111,7 +111,25 @@ export function createDatabase(databasePath, sessionDefaults) {
 
     CREATE INDEX IF NOT EXISTS idx_messages_agent_workspace
     ON messages(agent_name, workspace_id, created_at);
+
+    -- workspace_agents: which agents belong to each workspace (PTY-first membership)
+    CREATE TABLE IF NOT EXISTS workspace_agents (
+      workspace_id TEXT NOT NULL,
+      agent_name   TEXT NOT NULL,
+      is_parent    INTEGER NOT NULL DEFAULT 0,
+      added_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (workspace_id, agent_name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace
+    ON workspace_agents(workspace_id);
   `);
+
+  // --- New column migrations ---
+  ensureColumn(db, "agents", "theme_color", "TEXT");
+  ensureColumn(db, "agents", "enabled", "INTEGER DEFAULT 1");
+  ensureColumn(db, "agents", "settings_json", "TEXT");
+  ensureColumn(db, "workspaces", "parent_agent", "TEXT");
 
   // --- Legacy column migrations ---
   ensureColumn(db, "sessions", "model", "TEXT");

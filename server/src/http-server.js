@@ -511,7 +511,15 @@ export function createHttpServer({
         // POST /api/workspaces — create workspace
         if (pathname === "/api/workspaces" && request.method === "POST") {
           const body = await readJsonBody(request);
-          const ws = agentBridge.createWorkspace({ name: body.name, workdir: body.workdir });
+          if (!body.name?.trim()) {
+            sendJson(response, 400, { error: "name is required" });
+            return;
+          }
+          const ws = agentBridge.createWorkspace({
+            name: body.name.trim(),
+            workdir: body.workdir?.trim() || undefined,
+            parentAgent: body.parentAgent?.trim() || undefined,
+          });
           sendJson(response, 201, ws);
           return;
         }
@@ -546,6 +554,51 @@ export function createHttpServer({
           } catch (err) {
             sendJson(response, 400, { error: err.message });
           }
+          return;
+        }
+
+        // GET /api/workspaces/:id/messages — cross-agent workspace timeline
+        const wsMsgMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/messages$/);
+        if (wsMsgMatch && request.method === "GET") {
+          const limit = parseInt(url.searchParams.get("limit") || "100", 10);
+          sendJson(response, 200, agentBridge.listWorkspaceMessages(wsMsgMatch[1], limit));
+          return;
+        }
+
+        // GET /api/workspaces/:id/agents — list membership
+        const wsAgentsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/agents$/);
+        if (wsAgentsMatch && request.method === "GET") {
+          sendJson(response, 200, agentBridge.listWorkspaceAgents(wsAgentsMatch[1]));
+          return;
+        }
+
+        // POST /api/workspaces/:id/agents — add agent to workspace
+        if (wsAgentsMatch && request.method === "POST") {
+          const body = await readJsonBody(request);
+          if (!body.agentName?.trim()) {
+            sendJson(response, 400, { error: "agentName is required" });
+            return;
+          }
+          try {
+            const result = agentBridge.addWorkspaceAgent({
+              workspaceId: wsAgentsMatch[1],
+              agentName: body.agentName.trim(),
+            });
+            sendJson(response, 201, result);
+          } catch (err) {
+            sendJson(response, 400, { error: err.message });
+          }
+          return;
+        }
+
+        // DELETE /api/workspaces/:id/agents/:agentName — remove agent from workspace
+        const wsAgentItemMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/agents\/([^/]+)$/);
+        if (wsAgentItemMatch && request.method === "DELETE") {
+          const removed = agentBridge.removeWorkspaceAgent({
+            workspaceId: wsAgentItemMatch[1],
+            agentName: wsAgentItemMatch[2],
+          });
+          sendJson(response, 200, { removed });
           return;
         }
 

@@ -1,16 +1,16 @@
 /**
- * AgentBridge — multicodi の新マルチエージェント実行レイヤー
+ * AgentBridge — multicodi マルチエージェント実行レイヤー
  *
- * 既存の BridgeService (Codex専用) と並列で動作する。
- * AgentRegistry を通じて Claude / Gemini / Codex を実行し、
- * CanonicalEvent を EventBus に流す。
+ * PTY-first 設計 (Phase A):
+ *   runPrompt() → DB 保存 → PtyService.sendPrompt() → PTY stdin
+ *                ← PtyService 完了時に DB 保存 / SSE / Discord へ反映
  *
- * 将来的に BridgeService を置き換えることを想定しているが、
- * Phase 1 では共存させて既存機能への影響をゼロにする。
+ * PTY key: workspaceId:agentName (PtyService 側で管理)
  */
 
 import { calcCost } from "./pricing.js";
 
+/** Cost period → ISO datetime */
 function periodToSince(period) {
   if (!period || period === "all") return null;
   const d = new Date();
@@ -21,20 +21,32 @@ function periodToSince(period) {
   return d.toISOString().slice(0, 19).replace("T", " ");
 }
 
+/** Format workspace messages as a context block for PTY input. */
+function buildContextBlock(messages) {
+  if (!messages || messages.length === 0) return null;
+  const lines = messages.map((m) => {
+    const speaker =
+      m.role === "user"
+        ? `You -> ${m.agentName}`
+        : `${m.agentName}`;
+    const body = (m.content || "").slice(0, 400); // truncate per message
+    return `${speaker}: ${body}`;
+  });
+  return lines.join("\n");
+}
+
 export class AgentBridge {
   /**
-   * @param {{ agentRegistry, store, bus, config }} deps
+   * @param {{ agentRegistry, store, bus, config, ptyService? }} deps
    */
-  constructor({ agentRegistry, store, bus, config }) {
+  constructor({ agentRegistry, store, bus, config, ptyService }) {
     this.agentRegistry = agentRegistry;
     this.store = store;
     this.bus = bus;
     this.config = config;
+    this.ptyService = ptyService ?? null;
 
-    // Inject store into registry for session persistence
     agentRegistry.setStore(store);
-
-    // Ensure default workspace row exists in agents table
     this._syncAgentsToDb();
   }
 
@@ -45,38 +57,46 @@ export class AgentBridge {
   }
 
   // ---------------------------------------------------------------------------
-  // Main entry point
+  // Main entry point (PTY-first)
   // ---------------------------------------------------------------------------
 
   /**
-   * Run a prompt against a named agent.
+   * Run a prompt against a named agent via PTY.
    *
    * @param {object} opts
    * @param {string} opts.agentName
    * @param {string} opts.prompt
-   * @param {string} [opts.workspaceId]   defaults to "default"
+   * @param {string} [opts.workspaceId]
    * @param {string} [opts.workdir]
-   * @param {string} [opts.source]        "discord" | "ui" | "schedule"
-   * @param {string} [opts.discordMessageId]  for Discord reply threading
-   * @returns {Promise<{ text: string, usage: object, sessionRef: string }>}
+   * @param {string} [opts.source]          "discord" | "ui" | "schedule"
+   * @param {string} [opts.discordMessageId]
+   * @param {Function} [opts.onProgress]    called with CanonicalEvents (for Discord live updates)
+   * @returns {Promise<{ text: string }>}
    */
-  async runPrompt({ agentName, prompt, workspaceId = "default", workdir, source = "ui", discordMessageId, onProgress }) {
-    const agent = this.agentRegistry.get(agentName);
-    if (!agent) {
-      throw new Error(`エージェント "${agentName}" が見つかりません。\`agents?\` で確認してください。`);
+  async runPrompt({
+    agentName,
+    prompt,
+    workspaceId = "default",
+    workdir,
+    source = "ui",
+    discordMessageId,
+    onProgress,
+  }) {
+    if (!this.ptyService) {
+      throw new Error("PtyService が初期化されていません。");
     }
 
-    const resolvedWorkdir = workdir || this.config.codexWorkdir;
+    const agent = this.agentRegistry.get(agentName);
+    if (!agent) {
+      throw new Error(
+        `エージェント "${agentName}" が見つかりません。\`agents?\` で確認してください。`
+      );
+    }
 
-    // Start run record
-    const run = this.store.startRun({
-      agentName,
-      workspaceId,
-      prompt,
-      source,
-    });
+    // 1. Start run record in DB
+    const run = this.store.startRun({ agentName, workspaceId, prompt, source });
 
-    // Record user message
+    // 2. Save user message
     this.store.addMessage({
       agentName,
       workspaceId,
@@ -86,71 +106,51 @@ export class AgentBridge {
       source,
     });
 
-    // Emit user message event to bus
+    // 3. Emit user events to EventBus
     this._emit({ type: "message.user", agentName, content: prompt, source, runId: run.id, workspaceId });
-    this._emit({ type: "status.change", agentName, status: "running", workspaceId });
+    this._emit({ type: "status.change", agentName, status: "running", workspaceId, runId: run.id });
 
-    let fullText = "";
+    // 4. Build context from recent workspace messages (excluding the message just added)
+    const recentMessages = this.store.listWorkspaceMessages(workspaceId, 21)
+      .filter((m) => !(m.role === "user" && m.runId === run.id)); // exclude current user msg
+    const context = buildContextBlock(recentMessages.slice(-20));
 
     try {
-      const result = await agent.run({
+      // 5. Send via PTY — waits until heuristic completion (5s silence)
+      const result = await this.ptyService.sendPrompt({
+        agentName,
+        workspaceId,
         prompt,
-        workdir: resolvedWorkdir,
-        onCanonicalEvent: (event) => {
-          // Attach run context to events
-          const enriched = { ...event, runId: run.id, workspaceId };
-          this._emit(enriched);
-          onProgress?.(enriched);
-
-          // Accumulate text for storage
-          if (event.type === "message.delta") fullText += event.content;
-          if (event.type === "message.done") fullText = event.content;
-        },
+        context,
+        runId: run.id,
+        workdir,
       });
 
-      // Compute cost
-      const costUsd = result.usage?.costUsd ?? calcCost(agent.model || agent.adapter.defaultModel, result.usage)?.usd ?? null;
+      const text = result.text ?? "";
 
-      // Finalize run record
-      this.store.completeRun(run.id, {
-        status: "completed",
-        inputTokens: result.usage?.inputTokens,
-        outputTokens: result.usage?.outputTokens,
-        costUsd,
-      });
+      // 6. Finalize run
+      this.store.completeRun(run.id, { status: "completed" });
 
-      // Store assistant message (final text)
-      if (fullText || result.text) {
+      // 7. Save assistant message
+      if (text) {
         this.store.addMessage({
           agentName,
           workspaceId,
           runId: run.id,
           role: "assistant",
-          content: fullText || result.text,
-          metadata: { usage: result.usage },
+          content: text,
           source: "agent",
         });
       }
 
-      // Persist session ref
-      this.store.upsertAgentSession({
-        agentName,
-        workspaceId,
-        providerSessionRef: result.sessionRef,
-        model: agent.model || null,
-        workdir: resolvedWorkdir,
-        lastRunState: "completed",
-      });
-
+      this._emit({ type: "message.done", agentName, content: text, runId: run.id, workspaceId });
       this._emit({ type: "status.change", agentName, status: "idle", workspaceId });
 
-      return { text: fullText || result.text, usage: result.usage, sessionRef: result.sessionRef };
+      return { text };
     } catch (err) {
       const cancelled = Boolean(err.cancelled);
 
-      this.store.completeRun(run.id, {
-        status: cancelled ? "cancelled" : "error",
-      });
+      this.store.completeRun(run.id, { status: cancelled ? "cancelled" : "error" });
 
       this._emit({
         type: "run.error",
@@ -160,7 +160,12 @@ export class AgentBridge {
         runId: run.id,
         workspaceId,
       });
-      this._emit({ type: "status.change", agentName, status: cancelled ? "idle" : "error", workspaceId });
+      this._emit({
+        type: "status.change",
+        agentName,
+        status: cancelled ? "idle" : "error",
+        workspaceId,
+      });
 
       throw err;
     }
@@ -170,30 +175,34 @@ export class AgentBridge {
   // Agent control
   // ---------------------------------------------------------------------------
 
-  cancelAgent(agentName) {
+  cancelAgent(agentName, workspaceId = "default") {
+    // With PTY-first, "cancel" means killing the PTY for this agent×workspace
+    const killed = this.ptyService?.killAgent(agentName, workspaceId) ?? false;
+    // Also cancel any in-flight adapter run (legacy fallback)
     const agent = this.agentRegistry.get(agentName);
-    if (!agent) return false;
-    agent.cancel();
-    this._emit({ type: "status.change", agentName, status: "idle" });
-    return true;
+    if (agent) agent.cancel?.();
+    this._emit({ type: "status.change", agentName, status: "idle", workspaceId });
+    return killed;
   }
 
   resetAgentSession(agentName, workspaceId = "default") {
+    // Kill PTY → next sendPrompt will spawn a fresh CLI session
+    this.ptyService?.killAgent(agentName, workspaceId);
     const agent = this.agentRegistry.get(agentName);
     if (!agent) return false;
-    agent.resetSession();
-    // Clear from DB too
+    agent.resetSession?.();
     this.store.upsertAgentSession({
       agentName,
       workspaceId,
       providerSessionRef: null,
       lastRunState: "idle",
     });
-    this._emit({ type: "status.change", agentName, status: "idle" });
+    this._emit({ type: "status.change", agentName, status: "idle", workspaceId });
     return true;
   }
 
   stopAll() {
+    this.ptyService?.stopAll();
     this.agentRegistry.stopAll();
   }
 
@@ -202,12 +211,12 @@ export class AgentBridge {
   // ---------------------------------------------------------------------------
 
   async switchWorkspace(workspaceId) {
-    // Check no agent is running
     const running = this.agentRegistry.list().filter((a) => a.status === "running");
     if (running.length > 0) {
-      throw new Error(`実行中のエージェントがあります: ${running.map((a) => a.name).join(", ")}。停止してから切り替えてください。`);
+      throw new Error(
+        `実行中のエージェントがあります: ${running.map((a) => a.name).join(", ")}。停止してから切り替えてください。`
+      );
     }
-
     await this.agentRegistry.switchWorkspace(workspaceId);
     this.store.setActiveWorkspace(workspaceId);
     this._emit({ type: "workspace.switched", workspaceId });
@@ -221,19 +230,51 @@ export class AgentBridge {
     return this.store.listWorkspaces();
   }
 
-  createWorkspace({ name, workdir }) {
-    return this.store.createWorkspace({ name, workdir });
+  createWorkspace({ name, workdir, parentAgent }) {
+    const ws = this.store.createWorkspace({ name, workdir });
+    // Register parent agent membership
+    if (parentAgent && ws) {
+      this.store.addWorkspaceAgent({ workspaceId: ws.id, agentName: parentAgent, isParent: true });
+    }
+    return ws;
   }
 
   deleteWorkspace(id) {
-    if (id === "default") throw new Error("defaultワークスペースは削除できません。");
+    if (id === "default") throw new Error("default ワークスペースは削除できません。");
     const running = this.agentRegistry.list().filter((a) => a.status === "running");
-    if (running.length > 0) throw new Error("実行中のエージェントがあります。停止してから削除してください。");
+    if (running.length > 0) {
+      throw new Error("実行中のエージェントがあります。停止してから削除してください。");
+    }
     return this.store.deleteWorkspace(id);
   }
 
   renameWorkspace(id, name) {
     return this.store.updateWorkspace(id, { name });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workspace agent membership
+  // ---------------------------------------------------------------------------
+
+  listWorkspaceAgents(workspaceId) {
+    return this.store.listWorkspaceAgents(workspaceId);
+  }
+
+  addWorkspaceAgent({ workspaceId, agentName }) {
+    const MAX_WORKSPACE_AGENTS = 4;
+    const count = this.store.countWorkspaceAgents(workspaceId);
+    if (count >= MAX_WORKSPACE_AGENTS) {
+      throw new Error(`workspace あたりの最大エージェント数 (${MAX_WORKSPACE_AGENTS}) に達しています。`);
+    }
+    return this.store.addWorkspaceAgent({ workspaceId, agentName, isParent: false });
+  }
+
+  removeWorkspaceAgent({ workspaceId, agentName }) {
+    return this.store.removeWorkspaceAgent({ workspaceId, agentName });
+  }
+
+  getWorkspaceParentAgent(workspaceId) {
+    return this.store.getWorkspaceParentAgent(workspaceId);
   }
 
   // ---------------------------------------------------------------------------
@@ -253,14 +294,14 @@ export class AgentBridge {
     return this.store.listMessages(agentName, workspaceId, limit);
   }
 
+  listWorkspaceMessages(workspaceId = "default", limit = 100) {
+    return this.store.listWorkspaceMessages(workspaceId, limit);
+  }
+
   listRuns(agentName, workspaceId = "default", limit = 20) {
     return this.store.listRuns(agentName, workspaceId, limit);
   }
 
-  /**
-   * Aggregate cost summary.
-   * @param {{ agentName?: string, workspaceId?: string, period?: "today"|"week"|"month"|"all" }} opts
-   */
   getCostSummary({ agentName, workspaceId, period = "all" } = {}) {
     const since = periodToSince(period);
     return this.store.getCostSummary({ agentName, workspaceId, since });

@@ -278,6 +278,33 @@ export class Store {
     this.getDiscordBindingStatement = db.prepare(
       `SELECT * FROM workspace_discord_bindings WHERE discord_channel_id=?`
     );
+
+    // ---- Workspace agents statements (PTY-first membership) ----
+    this.upsertWorkspaceAgentStatement = db.prepare(`
+      INSERT INTO workspace_agents (workspace_id, agent_name, is_parent, added_at)
+      VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(workspace_id, agent_name) DO UPDATE SET
+        is_parent=CASE WHEN excluded.is_parent=1 THEN 1 ELSE is_parent END
+    `);
+    this.removeWorkspaceAgentStatement = db.prepare(
+      `DELETE FROM workspace_agents WHERE workspace_id=? AND agent_name=? AND is_parent=0`
+    );
+    this.listWorkspaceAgentsStatement = db.prepare(
+      `SELECT * FROM workspace_agents WHERE workspace_id=? ORDER BY is_parent DESC, added_at ASC`
+    );
+    this.getWorkspaceParentAgentStatement = db.prepare(
+      `SELECT agent_name FROM workspace_agents WHERE workspace_id=? AND is_parent=1 LIMIT 1`
+    );
+    this.countWorkspaceAgentsStatement = db.prepare(
+      `SELECT COUNT(*) AS cnt FROM workspace_agents WHERE workspace_id=?`
+    );
+
+    // ---- Workspace-level messages (cross-agent timeline) ----
+    this.listWorkspaceMessagesStatement = db.prepare(`
+      SELECT * FROM (
+        SELECT rowid, * FROM messages WHERE workspace_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?
+      ) ORDER BY created_at ASC, rowid ASC
+    `);
   }
 
   // ---------------------------------------------------------------------------
@@ -535,6 +562,44 @@ export class Store {
 
   listMessages(agentName, workspaceId, limit = 200) {
     return this.listMessagesStatement.all(agentName, workspaceId, limit).map(parseMessage);
+  }
+
+  /** Cross-agent messages for a workspace, time-sorted. */
+  listWorkspaceMessages(workspaceId, limit = 100) {
+    return this.listWorkspaceMessagesStatement.all(workspaceId, limit).map(parseMessage);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workspace agents methods (PTY-first membership)
+  // ---------------------------------------------------------------------------
+
+  addWorkspaceAgent({ workspaceId, agentName, isParent = false }) {
+    this.upsertWorkspaceAgentStatement.run(workspaceId, agentName, isParent ? 1 : 0);
+    return { workspaceId, agentName, isParent };
+  }
+
+  removeWorkspaceAgent({ workspaceId, agentName }) {
+    // Only removes non-parent agents (parent is locked)
+    const result = this.removeWorkspaceAgentStatement.run(workspaceId, agentName);
+    return result.changes > 0;
+  }
+
+  listWorkspaceAgents(workspaceId) {
+    return this.listWorkspaceAgentsStatement.all(workspaceId).map((row) => ({
+      workspaceId: row.workspace_id,
+      agentName: row.agent_name,
+      isParent: Boolean(row.is_parent),
+      addedAt: row.added_at,
+    }));
+  }
+
+  getWorkspaceParentAgent(workspaceId) {
+    const row = this.getWorkspaceParentAgentStatement.get(workspaceId);
+    return row?.agent_name ?? null;
+  }
+
+  countWorkspaceAgents(workspaceId) {
+    return this.countWorkspaceAgentsStatement.get(workspaceId)?.cnt ?? 0;
   }
 
   // ---------------------------------------------------------------------------

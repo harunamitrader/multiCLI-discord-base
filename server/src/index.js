@@ -21,10 +21,6 @@ async function main() {
   const store = new Store(db);
   const bus = new EventBus();
   const codex = new CodexAdapter(config);
-  const agentRegistry = new AgentRegistry(config);
-  const agentBridge = new AgentBridge({ agentRegistry, store, bus, config });
-  const attachments = new AttachmentService(config);
-  const bridge = new BridgeService({ store, bus, codex, config, attachments });
   let shutdownPromise = null;
   let restartRequested = false;
   let restartPromise = null;
@@ -33,6 +29,13 @@ async function main() {
   let scheduler = null;
   let server = null;
   let ptyService = null;
+
+  const agentRegistry = new AgentRegistry(config);
+  // PtyService must be created before AgentBridge so it can be injected
+  ptyService = new PtyService({ agentRegistry, config, bus });
+  const agentBridge = new AgentBridge({ agentRegistry, store, bus, config, ptyService });
+  const attachments = new AttachmentService(config);
+  const bridge = new BridgeService({ store, bus, codex, config, attachments });
   const shutdown = async () => {
     if (shutdownPromise) {
       return shutdownPromise;
@@ -70,7 +73,6 @@ async function main() {
 
     return restartPromise;
   };
-  ptyService = new PtyService({ agentRegistry, config });
   discord = new DiscordAdapter({ bridge, agentBridge, bus, config, attachments, restartServer, agentRegistry });
   fileWatcher = new FileWatcherService({ config, discord });
   scheduler = new SchedulerService({ config, bus });
