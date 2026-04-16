@@ -1,0 +1,28 @@
+{
+  "agents": [
+    {
+      "name": "gemini",
+      "type": "gemini",
+      "model": "gemini-2.5-flash",
+      "settings": {}
+    },
+    {
+      "name": "claude",
+      "type": "claude",
+      "model": "claude-sonnet-4-6",
+      "settings": {}
+    },
+    {
+      "name": "copilot",
+      "type": "copilot",
+      "model": "gpt-5.4",
+      "settings": {}
+    },
+    {
+      "name": "codex",
+      "type": "codex",
+      "model": "gpt-5.4",
+      "settings": {}
+    }
+  ]
+}

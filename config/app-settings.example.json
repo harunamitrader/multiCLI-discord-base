@@ -1,0 +1,18 @@
+{
+  "discord": {
+    "statusUpdates": true,
+    "maxAttachmentsPerMessage": 5,
+    "maxAttachmentBytes": 20971520
+  },
+  "fileWatch": {
+    "debounceMs": 1000,
+    "maxAttachmentBytes": 8388608,
+    "ignore": [
+      ".git",
+      "node_modules",
+      "dist",
+      ".next",
+      "coverage"
+    ]
+  }
+}

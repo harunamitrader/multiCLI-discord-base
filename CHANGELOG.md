@@ -2,6 +2,13 @@
 
 このファイルでは、このプロジェクトの主な変更を記録します。
 
+## 0.1.68 - 2026-04-16
+
+- 正式名称 `multiCLI-discord-base` への刷新を公開向けに整理し、UI / launcher / 主要ドキュメントの名称を統一
+- `README.md` / `docs\MULTI_CLI_SPEC.md` / Discord 関連ドキュメントの公開向け表記を見直し、ローカル絶対パスや private な検証情報を削減
+- 公開不要な handover / review / UI 作業メモ系ドキュメントを整理
+- `package.json` / `package-lock.json` / UI asset query string を `0.1.68` に更新
+
 ## 0.1.67 - 2026-04-02
 
 - Discord の進捗表示を再調整し、古い `Working` / 終了ステータスを削除してから、新しい進捗・最終状態を末尾へ再投稿するよう改善
@@ -23,7 +30,7 @@
 - スケジュール一覧・cron 日本語表示・稼働状態表示・既定値保存をローカル UI に追加
 - セッションごと / スケジュール既定値ごとに、`CODEX_WORKDIR` 配下の working directory を選択できるよう改善
 - Windows のフォルダ picker と、作業ディレクトリ変更時の安全チェックを追加
-- `launch-browser.cmd` / `launch-browser.ps1` / `codicodi-server.cmd` / `scripts/start-server.cmd` を追加し、ブラウザ起動とサーバー起動を補助
+- `launch-browser.cmd` / `launch-browser.ps1` / `start-multiCLI-discord-base.bat` / `scripts/start-server.cmd` を追加し、ブラウザ起動とサーバー起動を補助
 - composer に `Enter Send` トグルを追加し、右側操作ボタン列とセッション / スケジュール表示を再調整
 - HTML / service worker / manifest / package version を `0.1.65` に更新
 
@@ -130,9 +137,9 @@
 
 ## 0.1.24 - 2026-03-21
 
-- PWA のインストール名を `CoDiCoDi` に統一
-- ブラウザタブのタイトルを `CoDiCoDi` に変更
-- Tauri 版の product name / main window title / splash title を `CoDiCoDi` に統一
+- PWA のインストール名を `multiCLI-discord-base` に統一
+- ブラウザタブのタイトルを `multiCLI-discord-base` に変更
+- Tauri 版の product name / main window title / splash title を `multiCLI-discord-base` に統一
 - manifest / HTML / service worker の version と cache key を更新
 
 ## 0.1.25 - 2026-03-21
@@ -185,7 +192,7 @@
 
 ## 0.1.0 - 2026-03-18
 
-`Codex Discord Connected Display (CoDiCoDi)` としてのオープンソース公開向け初回スナップショット。
+現在の multiCLI-discord-base につながるオープンソース公開向け初回スナップショット。
 
 この時点で含まれている主な内容:
 

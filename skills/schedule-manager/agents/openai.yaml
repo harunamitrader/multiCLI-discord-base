@@ -1,4 +1,4 @@
 interface:
   display_name: "Schedule Manager"
-  short_description: "Manage cron schedule JSON jobs for CoDiCoDi"
-  default_prompt: "Use $schedule-manager to create, edit, pause, resume, list, or delete CoDiCoDi schedule jobs in data/schedules."
+  short_description: "Manage cron schedule JSON jobs for multiCLI-discord-base"
+  default_prompt: "Use $schedule-manager to create, edit, pause, resume, list, or delete multiCLI-discord-base schedule jobs in data/schedules."

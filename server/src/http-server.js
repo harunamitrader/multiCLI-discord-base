@@ -48,9 +48,14 @@ function serveFile(response, filePath) {
     return;
   }
 
-  response.writeHead(200, {
+  const headers = {
     "Content-Type": contentTypes[extension] || "application/octet-stream",
-  });
+  };
+  if (extension === ".html" || extension === ".js" || extension === ".css") {
+    headers["Cache-Control"] = "no-store";
+  }
+
+  response.writeHead(200, headers);
 
   fs.createReadStream(filePath).pipe(response);
 }
@@ -106,6 +111,20 @@ export function createHttpServer({
         return;
       }
 
+      if (pathname === "/api/app-settings" && request.method === "GET") {
+        sendJson(response, 200, agentBridge?.getAppSettings?.() ?? { defaultWorkdir: "" });
+        return;
+      }
+
+      if (pathname === "/api/app-settings" && request.method === "PATCH") {
+        const body = await readJsonBody(request);
+        const settings = agentBridge?.updateAppSettings?.({
+          defaultWorkdir: "defaultWorkdir" in body ? (body.defaultWorkdir?.trim() || "") : undefined,
+        }) ?? { defaultWorkdir: "" };
+        sendJson(response, 200, settings);
+        return;
+      }
+
       if (pathname === "/api/workdirs" && request.method === "GET") {
         sendJson(response, 200, bridge.listSelectableWorkdirs());
         return;
@@ -145,7 +164,7 @@ export function createHttpServer({
         sendJson(response, 202, {
           accepted: true,
           message:
-            "Restart requested. If the server was launched via codicodi-server.cmd or scripts/start-server.cmd, it will come back automatically.",
+            "Restart requested. If the server was launched via start-multiCLI-discord-base.bat or scripts/start-server.cmd, it will come back automatically.",
         });
 
         queueMicrotask(() => {
@@ -186,6 +205,8 @@ export function createHttpServer({
           "xterm.js": "node_modules/@xterm/xterm/lib/xterm.js",
           "xterm.css": "node_modules/@xterm/xterm/css/xterm.css",
           "addon-fit.js": "node_modules/@xterm/addon-fit/lib/addon-fit.js",
+          "addon-search.js": "node_modules/@xterm/addon-search/lib/addon-search.js",
+          "addon-web-links.js": "node_modules/@xterm/addon-web-links/lib/addon-web-links.js",
         };
         const target = allowedFiles[rel];
         if (!target) { response.writeHead(404); response.end("Not found"); return; }
@@ -494,11 +515,53 @@ export function createHttpServer({
         return;
       }
 
-      // ── multicodi: Agent API ──────────────────────────────────────────────
+      // ── multiCLI-discord-base: Agent API ──────────────────────────────────────────────
       if (agentBridge) {
         // GET /api/agents — list all agents
         if (pathname === "/api/agents" && request.method === "GET") {
           sendJson(response, 200, agentBridge.listAgents());
+          return;
+        }
+
+        // POST /api/agents — create custom agent
+        if (pathname === "/api/agents" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          if (!body.name?.trim()) {
+            sendJson(response, 400, { error: "name is required" });
+            return;
+          }
+          if (!body.type?.trim()) {
+            sendJson(response, 400, { error: "type is required" });
+            return;
+          }
+          try {
+            const settings = {
+              workdir: body.workdir?.trim() || "",
+              planMode: body.planMode?.trim() || "",
+              instructions: body.instructions?.trim() || "",
+            };
+            const reasoningEffort = body.reasoningEffort?.trim() || body.reasoning?.trim() || "";
+            if (reasoningEffort) {
+              settings.reasoningEffort = reasoningEffort;
+            }
+            if ("fastMode" in body) {
+              settings.fastMode =
+                body.fastMode === true || body.fastMode === "fast"
+                  ? true
+                  : body.fastMode === false || body.fastMode === "flex"
+                    ? false
+                    : "";
+            }
+            const agent = agentBridge.createAgent({
+              name: body.name.trim(),
+              type: body.type.trim(),
+              model: body.model?.trim() || "",
+              settings,
+            });
+            sendJson(response, 201, agent);
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
           return;
         }
 
@@ -515,18 +578,42 @@ export function createHttpServer({
             sendJson(response, 400, { error: "name is required" });
             return;
           }
-          const ws = agentBridge.createWorkspace({
-            name: body.name.trim(),
-            workdir: body.workdir?.trim() || undefined,
-            parentAgent: body.parentAgent?.trim() || undefined,
-          });
-          sendJson(response, 201, ws);
+          const requestedParentAgent = body.parentAgent?.trim();
+          const availableAgents = agentBridge.listAgents();
+          const parentAgent =
+            requestedParentAgent ||
+            (availableAgents.length === 1 ? availableAgents[0].name : "");
+
+          if (!parentAgent) {
+            sendJson(response, 400, { error: "parentAgent is required" });
+            return;
+          }
+          if (!agentBridge.getAgent(parentAgent)) {
+            sendJson(response, 400, { error: `Unknown parentAgent: ${parentAgent}` });
+            return;
+          }
+          try {
+            const ws = agentBridge.createWorkspace({
+              name: body.name.trim(),
+              workdir: body.workdir?.trim() || undefined,
+              parentAgent,
+            });
+            sendJson(response, 201, ws);
+          } catch (err) {
+            sendJson(response, 400, {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
           return;
         }
 
         // POST /api/workspaces/:id/activate — switch active workspace
         const wsActivateMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/activate$/);
         if (wsActivateMatch && request.method === "POST") {
+          if (!agentBridge.getWorkspace(wsActivateMatch[1])) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
           await agentBridge.switchWorkspace(wsActivateMatch[1]);
           sendJson(response, 200, { ok: true, workspaceId: wsActivateMatch[1] });
           return;
@@ -548,7 +635,7 @@ export function createHttpServer({
         // DELETE /api/workspaces/:id — delete workspace
         if (wsMatch && request.method === "DELETE") {
           try {
-            const ws = agentBridge.deleteWorkspace(wsMatch[1]);
+            const ws = await agentBridge.deleteWorkspace(wsMatch[1]);
             if (!ws) { sendJson(response, 404, { error: "Workspace not found" }); return; }
             sendJson(response, 200, { deleted: true, workspace: ws });
           } catch (err) {
@@ -560,20 +647,59 @@ export function createHttpServer({
         // GET /api/workspaces/:id/messages — cross-agent workspace timeline
         const wsMsgMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/messages$/);
         if (wsMsgMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsMsgMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
           const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-          sendJson(response, 200, agentBridge.listWorkspaceMessages(wsMsgMatch[1], limit));
+          sendJson(response, 200, agentBridge.listWorkspaceMessages(workspaceId, limit));
           return;
         }
 
         // GET /api/workspaces/:id/agents — list membership
         const wsAgentsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/agents$/);
         if (wsAgentsMatch && request.method === "GET") {
-          sendJson(response, 200, agentBridge.listWorkspaceAgents(wsAgentsMatch[1]));
+          const workspaceId = decodeURIComponent(wsAgentsMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          sendJson(response, 200, agentBridge.listWorkspaceAgents(workspaceId));
+          return;
+        }
+
+        const wsBindingMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/discord-binding$/);
+        if (wsBindingMatch && request.method === "GET") {
+          try {
+            sendJson(response, 200, agentBridge.listWorkspaceDiscordBindings(wsBindingMatch[1]));
+          } catch (err) {
+            sendJson(response, 404, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (wsBindingMatch && request.method === "PUT") {
+          const body = await readJsonBody(request);
+          try {
+            const binding = agentBridge.setWorkspaceDiscordBinding(wsBindingMatch[1], {
+              channelId: body.channelId?.trim() || "",
+              defaultAgent: body.defaultAgent?.trim() || "",
+            });
+            sendJson(response, 200, binding);
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
           return;
         }
 
         // POST /api/workspaces/:id/agents — add agent to workspace
         if (wsAgentsMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsAgentsMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
           const body = await readJsonBody(request);
           if (!body.agentName?.trim()) {
             sendJson(response, 400, { error: "agentName is required" });
@@ -581,7 +707,7 @@ export function createHttpServer({
           }
           try {
             const result = agentBridge.addWorkspaceAgent({
-              workspaceId: wsAgentsMatch[1],
+              workspaceId,
               agentName: body.agentName.trim(),
             });
             sendJson(response, 201, result);
@@ -594,65 +720,234 @@ export function createHttpServer({
         // DELETE /api/workspaces/:id/agents/:agentName — remove agent from workspace
         const wsAgentItemMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/agents\/([^/]+)$/);
         if (wsAgentItemMatch && request.method === "DELETE") {
+          const workspaceId = decodeURIComponent(wsAgentItemMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
           const removed = agentBridge.removeWorkspaceAgent({
-            workspaceId: wsAgentItemMatch[1],
-            agentName: wsAgentItemMatch[2],
+            workspaceId,
+            agentName: decodeURIComponent(wsAgentItemMatch[2]),
           });
           sendJson(response, 200, { removed });
           return;
         }
 
         // POST /api/agents/:name/run — run prompt
+        const agentItemMatch = pathname.match(/^\/api\/agents\/([^/]+)$/);
+        if (agentItemMatch && request.method === "GET") {
+          const agent = agentBridge.getAgent(decodeURIComponent(agentItemMatch[1]));
+          if (!agent) {
+            sendJson(response, 404, { error: "Agent not found" });
+            return;
+          }
+          sendJson(response, 200, agent);
+          return;
+        }
+
+        if (agentItemMatch && request.method === "PATCH") {
+          const agentName = decodeURIComponent(agentItemMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            const settingsPatch = {};
+            if ("workdir" in body) settingsPatch.workdir = body.workdir?.trim() || "";
+            if ("reasoning" in body) settingsPatch.reasoning = body.reasoning?.trim() || "";
+            if ("reasoningEffort" in body) settingsPatch.reasoningEffort = body.reasoningEffort?.trim() || "";
+            if ("planMode" in body) settingsPatch.planMode = body.planMode?.trim() || "";
+            if ("instructions" in body) settingsPatch.instructions = body.instructions?.trim() || "";
+            if ("fastMode" in body) {
+              settingsPatch.fastMode =
+                body.fastMode === true || body.fastMode === "fast"
+                  ? true
+                  : body.fastMode === false || body.fastMode === "flex"
+                    ? false
+                    : "";
+            }
+            const agent = await agentBridge.updateAgent(agentName, {
+              name: body.name?.trim() || undefined,
+              type: body.type?.trim() || undefined,
+              model: "model" in body ? body.model?.trim() || "" : undefined,
+              settings: settingsPatch,
+            });
+            sendJson(response, 200, agent);
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (agentItemMatch && request.method === "DELETE") {
+          const agentName = decodeURIComponent(agentItemMatch[1]);
+          try {
+            const agent = await agentBridge.deleteAgent(agentName);
+            if (!agent) {
+              sendJson(response, 404, { error: "Agent not found" });
+              return;
+            }
+            sendJson(response, 200, { deleted: true, agent });
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         const agentRunMatch = pathname.match(/^\/api\/agents\/([^/]+)\/run$/);
         if (agentRunMatch && request.method === "POST") {
-          const agentName = agentRunMatch[1];
+          const agentName = decodeURIComponent(agentRunMatch[1]);
           const body = await readJsonBody(request);
-          const ws = agentBridge.getActiveWorkspace();
-          // Fire and forget — result comes via SSE
-          agentBridge.runPrompt({
-            agentName,
-            prompt: body.prompt,
-            workspaceId: ws?.id ?? "default",
-            workdir: body.workdir,
-            source: "ui",
-          }).catch(() => {});
-          sendJson(response, 202, { ok: true, agentName });
+          const requestedWorkspaceId = body.workspaceId?.trim();
+          const source = typeof body.source === "string" && body.source.trim()
+            ? body.source.trim()
+            : "ui";
+          const includeContext = body.includeContext !== false;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          const workspaceId = ws?.id ?? null;
+          if (!workspaceId) {
+            sendJson(response, 400, { error: "workspaceId is required when no workspace is active" });
+            return;
+          }
+          try {
+            const prepared = await agentBridge.preparePrompt({
+              agentName,
+              workspaceId,
+              workdir: body.workdir,
+            });
+            // Fire and forget — result comes via SSE
+            agentBridge.runPrompt({
+              agentName,
+              prompt: body.prompt,
+              workspaceId,
+              workdir: body.workdir,
+              source,
+              includeContext,
+              prepared,
+            }).catch(() => {});
+            sendJson(response, 202, { ok: true, agentName });
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
           return;
         }
 
         // POST /api/agents/:name/cancel — cancel running agent
         const agentCancelMatch = pathname.match(/^\/api\/agents\/([^/]+)\/cancel$/);
         if (agentCancelMatch && request.method === "POST") {
-          agentBridge.cancelAgent(agentCancelMatch[1]);
-          sendJson(response, 200, { ok: true });
+          const agentName = decodeURIComponent(agentCancelMatch[1]);
+          const body = await readJsonBody(request);
+          const requestedWorkspaceId =
+            body.workspaceId?.trim() || url.searchParams.get("workspace") || undefined;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          const workspaceId = ws?.id ?? null;
+          if (!workspaceId) {
+            sendJson(response, 400, { error: "workspaceId is required when no workspace is active" });
+            return;
+          }
+          agentBridge.cancelAgent(agentName, workspaceId);
+          sendJson(response, 200, { ok: true, workspaceId });
           return;
         }
 
         // POST /api/agents/:name/reset — reset session
         const agentResetMatch = pathname.match(/^\/api\/agents\/([^/]+)\/reset$/);
         if (agentResetMatch && request.method === "POST") {
-          const ws = agentBridge.getActiveWorkspace();
-          agentBridge.resetAgentSession(agentResetMatch[1], ws?.id ?? "default");
-          sendJson(response, 200, { ok: true });
+          const agentName = decodeURIComponent(agentResetMatch[1]);
+          const body = await readJsonBody(request);
+          const requestedWorkspaceId =
+            body.workspaceId?.trim() || url.searchParams.get("workspace") || undefined;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          const workspaceId = ws?.id ?? null;
+          if (!workspaceId) {
+            sendJson(response, 400, { error: "workspaceId is required when no workspace is active" });
+            return;
+          }
+          agentBridge.resetAgentSession(agentName, workspaceId);
+          sendJson(response, 200, { ok: true, workspaceId });
+          return;
+        }
+
+        // GET /api/agents/:name/terminal-state — PTY status for one workspace-aware terminal
+        const agentTerminalStateMatch = pathname.match(/^\/api\/agents\/([^/]+)\/terminal-state$/);
+        if (agentTerminalStateMatch && request.method === "GET") {
+          const agentName = decodeURIComponent(agentTerminalStateMatch[1]);
+          const requestedWorkspaceId = url.searchParams.get("workspace") || undefined;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          const workspaceId = ws?.id ?? null;
+          const terminalState = ptyService?.getAgentTerminalState(agentName, workspaceId) ?? {
+            status: "idle",
+            hasProcess: false,
+            readyForPrompt: false,
+            lastOutputAt: null,
+            runId: null,
+            configStale: false,
+            configWarning: "",
+          };
+          sendJson(response, 200, {
+            agentName,
+            workspaceId,
+            terminalKey: workspaceId ? `${workspaceId}:${agentName}` : null,
+            ...terminalState,
+          });
           return;
         }
 
         // GET /api/agents/:name/messages — chat history
         const agentMsgMatch = pathname.match(/^\/api\/agents\/([^/]+)\/messages$/);
         if (agentMsgMatch && request.method === "GET") {
-          const agentName = agentMsgMatch[1];
-          const ws = agentBridge.getActiveWorkspace();
+          const agentName = decodeURIComponent(agentMsgMatch[1]);
+          const requestedWorkspaceId = url.searchParams.get("workspace") || undefined;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
           const limit = parseInt(url.searchParams.get("limit") || "100", 10);
-          sendJson(response, 200, agentBridge.listMessages(agentName, ws?.id ?? "default", limit));
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          sendJson(
+            response,
+            200,
+            ws?.id ? agentBridge.listMessages(agentName, ws.id, limit) : []
+          );
           return;
         }
 
         // GET /api/agents/:name/runs — run history
         const agentRunsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/runs$/);
         if (agentRunsMatch && request.method === "GET") {
-          const agentName = agentRunsMatch[1];
-          const ws = agentBridge.getActiveWorkspace();
-          sendJson(response, 200, agentBridge.listRuns(agentName, ws?.id ?? "default"));
+          const agentName = decodeURIComponent(agentRunsMatch[1]);
+          const requestedWorkspaceId = url.searchParams.get("workspace") || undefined;
+          const ws = requestedWorkspaceId
+            ? agentBridge.store.getWorkspace(requestedWorkspaceId)
+            : agentBridge.getActiveWorkspace();
+          if (requestedWorkspaceId && !ws) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          sendJson(response, 200, ws?.id ? agentBridge.listRuns(agentName, ws.id) : []);
           return;
         }
 
@@ -667,7 +962,7 @@ export function createHttpServer({
       }
       // ─────────────────────────────────────────────────────────────────────
 
-      const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+      const relativePath = pathname === "/" ? "multiCLI-discord-base.html" : pathname.slice(1);
       const safePath = path.normalize(relativePath).replace(/^(\.\.[/\\])+/, "");
       const filePath = path.join(config.uiDir, safePath);
       serveFile(response, filePath);

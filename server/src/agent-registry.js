@@ -1,9 +1,11 @@
 import { CodexAdapter } from "./codex-adapter.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { GeminiAdapter } from "./gemini-adapter.js";
+import { CopilotAdapter } from "./copilot-adapter.js";
 import { formatUsage } from "./pricing.js";
 
 const MAX_AGENTS = 10;
+const SUPPORTED_AGENT_TYPES = new Set(["claude", "gemini", "copilot", "codex"]);
 
 const STATUS_EMOJI = {
   stopped: "⚪",
@@ -16,10 +18,12 @@ const STATUS_EMOJI = {
  * AgentInstance wraps one named agent with its adapter, session state, and workspace awareness.
  */
 class AgentInstance {
-  constructor({ name, type, model, config }) {
+  constructor({ name, type, model, config, settings = {}, source = "config" }) {
     this.name = name;
     this.type = type;           // "claude" | "codex" | "gemini"
     this.model = model || "";
+    this.settings = { ...settings, source };
+    this.source = source;
     this.status = "idle";       // "stopped" | "idle" | "running" | "error"
     this.lastError = null;
     this._runPromise = null;
@@ -27,9 +31,9 @@ class AgentInstance {
     // Session state per workspace: { [workspaceId]: providerSessionRef }
     this._sessionRefs = new Map();
     // Current active workspace
-    this._workspaceId = "default";
+    this._workspaceId = null;
 
-    const adapterConfig = { ...config, claudeModel: model, geminiModel: model };
+    const adapterConfig = { ...config, claudeModel: model, geminiModel: model, copilotModel: model };
 
     switch (type) {
       case "claude":
@@ -37,6 +41,9 @@ class AgentInstance {
         break;
       case "gemini":
         this.adapter = new GeminiAdapter(adapterConfig);
+        break;
+      case "copilot":
+        this.adapter = new CopilotAdapter(adapterConfig);
         break;
       case "codex":
       default:
@@ -160,81 +167,123 @@ class AgentInstance {
       name: this.name,
       type: this.type,
       model: this.model,
+      settings: { ...this.settings },
+      source: this.source,
+      editable: true,
       status: this.status,
       sessionRef: this.sessionRef,
       workspaceId: this._workspaceId,
       lastError: this.lastError,
     };
   }
+
+  applyPersistedConfig({ model, settings = {} }) {
+    if (model != null) {
+      this.model = model;
+    }
+    this.settings = {
+      ...this.settings,
+      ...settings,
+      source: settings?.source || this.source,
+    };
+    this.source = this.settings.source || this.source;
+  }
 }
 
 /**
  * AgentRegistry manages a pool of named agents.
  *
- * Env vars (case-insensitive name):
- *   AGENT_HANAKO_TYPE=claude
- *   AGENT_HANAKO_MODEL=claude-sonnet-4-6
- *   AGENT_TARO_TYPE=gemini
- *   AGENT_TARO_MODEL=gemini-2.5-flash
- *   AGENT_JIRO_TYPE=codex
+ * Agent definitions are loaded from config\agents.json.
  */
 export class AgentRegistry {
   constructor(config) {
     this._agents = new Map();
     this._config = config;
-    this._activeWorkspaceId = "default";
+    this._activeWorkspaceId = null;
     this._store = null;  // injected after construction via setStore()
-    this._loadFromEnv();
+    this._loadConfiguredAgents();
   }
 
   /** Inject store for session persistence. */
   setStore(store) {
     this._store = store;
+    this._activeWorkspaceId = store?.getActiveWorkspace?.()?.id ?? store?.listWorkspaces?.()?.[0]?.id ?? null;
+    for (const agent of this._agents.values()) {
+      agent.switchWorkspace(this._activeWorkspaceId);
+    }
   }
 
   // -------------------------------------------------------------------------
   // Initialization
   // -------------------------------------------------------------------------
 
-  _loadFromEnv() {
-    const prefix = "AGENT_";
-    const names = new Set();
+  _serializeConfiguredAgents() {
+    return this.list().map((agent) => ({
+      name: agent.name,
+      type: agent.type,
+      model: agent.model || "",
+      settings: {
+        ...(agent.settings ?? {}),
+      },
+    }));
+  }
 
-    for (const key of Object.keys(process.env)) {
-      if (!key.startsWith(prefix)) continue;
-      const rest = key.slice(prefix.length);
-      const underIdx = rest.lastIndexOf("_");
-      if (underIdx < 1) continue;
-      const name = rest.slice(0, underIdx).toLowerCase();
-      names.add(name);
+  _persistConfiguredAgents() {
+    if (typeof this._config?.saveAgentDefinitions !== "function") {
+      return;
     }
+    this._config.saveAgentDefinitions(this._serializeConfiguredAgents());
+  }
+
+  _loadConfiguredAgents() {
+    const definitions = Array.isArray(this._config?.configuredAgents)
+      ? this._config.configuredAgents
+      : [];
 
     let count = 0;
-    for (const name of names) {
+    for (const definition of definitions) {
       if (count >= MAX_AGENTS) {
-        console.warn(`[agent-registry] max ${MAX_AGENTS} agents reached, skipping "${name}"`);
+        console.warn(`[agent-registry] max ${MAX_AGENTS} agents reached, skipping "${definition?.name}"`);
         break;
       }
-      const envPrefix = `AGENT_${name.toUpperCase()}_`;
-      const type = (process.env[`${envPrefix}TYPE`] || "codex").toLowerCase();
-      const model = process.env[`${envPrefix}MODEL`] || "";
-      this._register(name, type, model);
+      const name = String(definition?.name || "").trim().toLowerCase();
+      const type = String(definition?.type || "").trim().toLowerCase();
+      if (!name || !type) {
+        continue;
+      }
+      this._register(name, type, String(definition?.model || "").trim(), {
+        settings: {
+          ...(definition?.settings ?? {}),
+          source: "config",
+        },
+        source: "config",
+      });
       count++;
     }
 
     if (this._agents.size === 0) {
-      console.log("[agent-registry] no AGENT_* env vars found. Using legacy single-agent mode.");
+      console.log("[agent-registry] no configured agents found. Use config\\agents.json or the UI to add agents.");
     } else {
       console.log(`[agent-registry] loaded ${this._agents.size} agent(s): ${[...this._agents.keys()].join(", ")}`);
     }
   }
 
-  _register(name, type, model) {
-    const instance = new AgentInstance({ name, type, model, config: this._config });
+  _register(name, type, model, { settings = {}, source = "config" } = {}) {
+    const instance = new AgentInstance({ name, type, model, config: this._config, settings, source });
     this._agents.set(name, instance);
 
     // Upsert into DB if store is available
-    this._store?.upsertAgent({ name, type, model });
+    this._store?.upsertAgent({
+      name,
+      type,
+      model,
+      status: "stopped",
+      enabled: true,
+      settings: {
+        ...settings,
+        source,
+      },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -257,6 +306,28 @@ export class AgentRegistry {
     return [...this._agents.values()].map((a) => a.toJSON());
   }
 
+  hydrateFromStore() {
+    if (!this._store) return;
+    const persistedAgents = this._store.listAgents();
+    for (const persisted of persistedAgents) {
+      const key = persisted.name.toLowerCase();
+      const existing = this._agents.get(key);
+      if (existing) {
+        existing.applyPersistedConfig({
+          model: persisted.model,
+          settings: persisted.settings,
+        });
+        continue;
+      }
+      if (persisted.enabled === false) continue;
+      if (!["custom", "config"].includes(persisted.source || persisted.settings?.source || "config")) continue;
+      this._register(persisted.name, persisted.type, persisted.model, {
+        settings: persisted.settings,
+        source: persisted.source || persisted.settings?.source || "config",
+      });
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Workspace switching
   // -------------------------------------------------------------------------
@@ -277,7 +348,7 @@ export class AgentRegistry {
 
     // Save current session refs
     for (const agent of this._agents.values()) {
-      if (agent.sessionRef) {
+      if (this._activeWorkspaceId && agent.sessionRef) {
         this._store.upsertAgentSession({
           agentName: agent.name,
           workspaceId: this._activeWorkspaceId,
@@ -289,6 +360,14 @@ export class AgentRegistry {
     }
 
     this._activeWorkspaceId = workspaceId;
+
+    if (!workspaceId) {
+      for (const agent of this._agents.values()) {
+        agent.switchWorkspace(null, null);
+      }
+      console.log("[agent-registry] switched to workspace \"none\"");
+      return;
+    }
 
     // Load new workspace session refs
     const sessions = this._store.listAgentSessionsByWorkspace(workspaceId);
@@ -331,11 +410,87 @@ export class AgentRegistry {
   /** Discord-friendly status list. */
   formatList() {
     if (this._agents.size === 0) {
-      return "エージェントが定義されていません。.envに `AGENT_<名前>_TYPE=claude` などを追加してください。";
+      return "エージェントが定義されていません。config\\agents.json を作成するか、UI の agent 作成を使ってください。";
     }
     const header = `**Agents** (workspace: ${this._activeWorkspaceId})`;
     const lines = [...this._agents.values()].map((a) => a.getStatusLine());
     return [header, ...lines].join("\n");
+  }
+
+  createCustomAgent({ name, type, model, settings = {} }) {
+    const normalizedName = String(name || "").trim().toLowerCase();
+    const normalizedType = String(type || "").trim().toLowerCase();
+    if (!normalizedName) {
+      throw new Error("agent name is required");
+    }
+    if (!SUPPORTED_AGENT_TYPES.has(normalizedType)) {
+      throw new Error(`Unsupported agent type: ${normalizedType}`);
+    }
+    if (this._agents.has(normalizedName)) {
+      throw new Error(`agent "${normalizedName}" already exists`);
+    }
+    if (this._agents.size >= MAX_AGENTS) {
+      throw new Error(`最大エージェント数 (${MAX_AGENTS}) に達しています。`);
+    }
+    const normalizedSettings = {
+      ...settings,
+      source: "config",
+    };
+    this._register(normalizedName, normalizedType, model || "", {
+      settings: normalizedSettings,
+      source: "config",
+    });
+    this._persistConfiguredAgents();
+    return this.get(normalizedName)?.toJSON() ?? null;
+  }
+
+  updateAgentConfig(name, patch = {}) {
+    const agent = this.get(name);
+    if (!agent) {
+      throw new Error(`agent "${name}" not found`);
+    }
+    if (patch.type && String(patch.type).trim().toLowerCase() !== agent.type) {
+      throw new Error("CLI type cannot be changed after creation.");
+    }
+    if (patch.name && String(patch.name).trim().toLowerCase() !== agent.name.toLowerCase()) {
+      throw new Error("Agent rename is not supported in this build.");
+    }
+    if (patch.model != null) {
+      agent.model = String(patch.model).trim();
+    }
+    if (patch.settings) {
+      agent.applyPersistedConfig({
+        model: agent.model,
+        settings: {
+          ...agent.settings,
+          ...patch.settings,
+          source: agent.source,
+        },
+      });
+    }
+    if (this._store) {
+      this._store.updateAgent(agent.name, {
+        model: agent.model,
+        enabled: patch.enabled == null ? true : Boolean(patch.enabled),
+        settings: {
+          ...agent.settings,
+          source: agent.source,
+        },
+      });
+    }
+    this._persistConfiguredAgents();
+    return agent.toJSON();
+  }
+
+  deleteAgent(name) {
+    const agent = this.get(name);
+    if (!agent) {
+      throw new Error(`agent "${name}" not found`);
+    }
+    this._agents.delete(agent.name.toLowerCase());
+    this._store?.deleteAgent?.(agent.name);
+    this._persistConfiguredAgents();
+    return agent.toJSON();
   }
 }
 

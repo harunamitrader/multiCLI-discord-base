@@ -11,6 +11,6 @@ function setTerminalTitle(title) {
   }
 }
 
-setTerminalTitle("codicodi-server");
+setTerminalTitle("multiCLI-discord-base");
 
 await import("../server/src/index.js");

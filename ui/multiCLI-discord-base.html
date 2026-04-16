@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>multiCLI-discord-base</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111c32'/%3E%3Ccircle cx='20' cy='20' r='8' fill='%233b82f6'/%3E%3Cpath d='M18 40c3-8 10-14 18-14 7 0 12 3 16 8l-6 5c-2-3-6-5-10-5-6 0-11 5-13 11z' fill='%23f59e0b'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/multiCLI-discord-base.css?v=0.1.68" />
+    <link rel="stylesheet" href="/xterm/xterm.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>multiCLI-discord-base</h1>
+          <div class="brand-caption">workspace-first persistent PTY</div>
+        </div>
+
+          <div id="session-sidebar" class="session-sidebar">
+            <p class="loading-note">読み込み中…</p>
+          </div>
+
+        <div id="workspace-selector" class="workspace-selector legacy-hidden" hidden>
+          <div class="workspace-row">
+            <select id="workspace-select" title="ワークスペース切り替え">
+              <option value="">workspace を選択</option>
+            </select>
+            <button id="btn-workspace-add" class="btn-icon" title="新しいワークスペース">＋</button>
+            <button id="btn-workspace-del" class="btn-icon btn-icon-danger" title="このワークスペースを削除">－</button>
+          </div>
+        </div>
+
+        <div class="agent-list legacy-hidden" id="agent-list" hidden>
+          <p class="loading-note">読み込み中…</p>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="btn-outline" id="btn-stop-all">⏹ 全停止</button>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="main-header">
+          <div id="selected-agent-summary" class="selected-agent-summary">
+            <div id="selected-agent-name" class="selected-agent-name">workspace を選択</div>
+            <span id="selected-agent-status" class="selected-agent-status disconnected">disconnected</span>
+          </div>
+          <div class="tab-bar">
+            <button class="tab-btn active" data-tab="chat">💬 Chat</button>
+            <button class="tab-btn" data-tab="settings">⚙ Settings</button>
+            <button class="tab-btn" data-tab="agents">🧩 Agents</button>
+          </div>
+        </header>
+
+        <section class="tab-panel active" id="tab-chat">
+          <div id="chat-route-hint" class="chat-route-hint">
+            bare prompt は親 agent へ、<code>agentName? prompt</code> で子 agent へ送信
+          </div>
+          <div class="chat-log" id="chat-log"></div>
+          <div class="chat-input-bar">
+            <textarea
+              id="chat-input"
+              class="chat-input"
+              placeholder="メッセージを入力… bare prompt は親agentへ、agentName? prompt で対象agentへ送信"
+              rows="1"
+            ></textarea>
+            <button class="btn-send" id="btn-send">Send</button>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-terminal">
+          <div class="terminal-toolbar" id="terminal-toolbar">
+            <div class="terminal-toolbar-main">
+              <div class="terminal-title-row">
+                <span id="terminal-agent-label" class="terminal-label">エージェントを選択してください</span>
+                <span id="terminal-workspace-label" class="terminal-workspace-label">workspace: -</span>
+                <span id="terminal-status-badge" class="terminal-status-badge disconnected">disconnected</span>
+              </div>
+               <div id="terminal-shared-hint" class="terminal-shared-hint">
+                 Chat / Discord / Schedule と同じ PTY stdin/stdout を共有
+               </div>
+               <div id="terminal-config-warning" class="terminal-config-warning" hidden></div>
+             </div>
+              <div class="terminal-actions">
+                  <button class="btn-terminal-action" id="btn-terminal-layout-side" title="marker を右側に表示" disabled hidden>⇥ Right</button>
+                  <button class="btn-terminal-action" id="btn-terminal-layout-bottom" title="marker を下側に表示" disabled hidden>⇩ Bottom</button>
+                  <button class="btn-terminal-action" id="btn-terminal-search" title="検索 (Ctrl+Shift+F)" disabled hidden>🔎 検索</button>
+                  <button class="btn-terminal-action" id="btn-terminal-copy" title="コピー (選択優先)" disabled hidden>📋 コピー</button>
+                  <button class="btn-terminal-action" id="btn-terminal-paste" title="貼り付け" disabled hidden>📥 貼り付け</button>
+                  <button class="btn-terminal-action" id="btn-terminal-clear" title="表示だけクリア" disabled hidden>🧹 クリア</button>
+              <button class="btn-terminal-action" id="btn-terminal-reconnect" title="再接続" disabled>↻ 再接続</button>
+              <button class="btn-terminal-kill" id="btn-terminal-kill" title="ターミナルを終了" disabled>⏹ 終了</button>
+            </div>
+          </div>
+          <div id="terminal-search-bar" class="terminal-search-bar" hidden>
+            <input id="terminal-search-input" class="terminal-search-input" type="text" placeholder="buffer を検索" />
+            <span id="terminal-search-count" class="terminal-search-count">0 / 0</span>
+            <label class="terminal-search-toggle"><input id="terminal-search-case" type="checkbox" />Aa</label>
+            <label class="terminal-search-toggle"><input id="terminal-search-word" type="checkbox" />単語</label>
+            <label class="terminal-search-toggle"><input id="terminal-search-regex" type="checkbox" />.*</label>
+            <button id="btn-terminal-search-prev" class="btn-terminal-action" title="前を検索">↑</button>
+            <button id="btn-terminal-search-next" class="btn-terminal-action" title="次を検索">↓</button>
+            <button id="btn-terminal-search-close" class="btn-terminal-action" title="検索を閉じる">✕</button>
+          </div>
+          <div id="terminal-layout" class="terminal-layout terminal-simplified" data-marker-layout="side">
+            <aside id="terminal-session-pane" class="terminal-session-pane" aria-label="Recent CLI sessions" tabindex="0" hidden>
+              <div class="terminal-session-pane-header">
+                <div class="terminal-session-pane-title">CLI Sessions</div>
+                <div id="terminal-session-count" class="terminal-session-count">0</div>
+              </div>
+              <div id="terminal-session-hint" class="terminal-session-hint">Terminal を開くと recent CLI session がここに保存されます</div>
+              <div id="terminal-session-list" class="terminal-session-list">
+                <div class="terminal-session-empty">まだ recent CLI session はありません</div>
+              </div>
+            </aside>
+              <div class="terminal-content">
+                <div class="terminal-stage terminal-stage-compact">
+                  <div id="terminal-shell" class="terminal-shell" tabindex="0">
+                    <div id="terminal-container" class="terminal-container"></div>
+                    <pre id="terminal-fallback-output" class="terminal-fallback-output" hidden></pre>
+                  </div>
+                  <aside id="terminal-marker-pane" class="terminal-marker-pane" aria-label="AI turn markers" tabindex="0" hidden>
+                  <div class="terminal-marker-pane-header">
+                    <div class="terminal-marker-pane-title">Turn Markers</div>
+                    <div id="terminal-marker-count" class="terminal-marker-count">0</div>
+                  </div>
+                  <div class="terminal-marker-nav">
+                    <button id="btn-terminal-marker-prev" class="btn-terminal-action" title="前の turn" disabled>↑ Turn</button>
+                    <button id="btn-terminal-marker-next" class="btn-terminal-action" title="次の turn" disabled>↓ Turn</button>
+                  </div>
+                  <div id="terminal-marker-summary" class="terminal-marker-summary">AI turn marker はまだありません</div>
+                  <div id="terminal-marker-overview" class="terminal-marker-overview" aria-label="Turn overview"></div>
+                  <div id="terminal-marker-list" class="terminal-marker-list">
+                    <div class="terminal-marker-empty">まだ marker はありません</div>
+                  </div>
+                </aside>
+              </div>
+              <div class="terminal-input-bar">
+                <label class="terminal-input-caption" for="terminal-input">補助入力</label>
+                <textarea
+                  id="terminal-input"
+                  class="terminal-input"
+                  placeholder="xterm が primary input。ここは補助入力 (/help、通常プロンプト、Enter 送信、Shift+Enter で改行)"
+                  rows="1"
+                  disabled
+                ></textarea>
+                <button id="btn-terminal-send" class="btn-terminal-send" disabled>送信</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-settings">
+            <div class="settings-panel">
+              <div class="settings-header-row">
+                <h2 class="settings-title">⚙ Settings</h2>
+                <div class="settings-header-actions">
+                  <button id="btn-settings-global" class="btn-outline settings-scope-btn active">Default</button>
+                  <span id="settings-context-chip" class="settings-context-chip" hidden></span>
+                </div>
+              </div>
+
+            <section id="session-create-panel" class="settings-section" hidden>
+              <h3>workspace 作成</h3>
+              <div class="settings-form two-col">
+                <label>workspace 名</label>
+                <input id="session-create-name" type="text" class="settings-input" placeholder="例: feature-x-review" />
+                <label>親 agent</label>
+                <select id="session-create-parent-agent" class="settings-input"></select>
+                <label>workdir (任意)</label>
+                <input id="session-create-workdir" type="text" class="settings-input" placeholder="例: C:\Users\you\projects\multiCLI-discord-base" />
+              </div>
+              <div class="settings-actions">
+                <button id="btn-session-create-save" class="btn-settings-save">workspace を作成</button>
+              </div>
+            </section>
+
+            <section id="global-settings-section" class="settings-section">
+              <h3>デフォルト設定</h3>
+              <div class="settings-form">
+                <label>デフォルト workdir</label>
+                <input id="settings-workdir" type="text" class="settings-input" placeholder="例: C:\Users\you\projects\myapp" />
+                <button id="btn-save-workdir" class="btn-settings-save">保存</button>
+              </div>
+            </section>
+
+            <section id="session-settings-section" class="settings-section" hidden>
+              <h3 id="session-settings-title">workspace 設定</h3>
+              <div class="settings-form two-col">
+                <label>workspace 名</label>
+                <input id="session-name-input" type="text" class="settings-input" />
+                <label>workdir</label>
+                <input id="session-workdir-input" type="text" class="settings-input" placeholder="例: C:\Users\you\projects\multiCLI-discord-base" />
+                <label>親 agent</label>
+                <input id="session-parent-agent" type="text" class="settings-input" readonly />
+                <label>Discord channel</label>
+                <select id="session-discord-channel" class="settings-input"></select>
+              </div>
+              <div class="settings-actions">
+                <button id="btn-session-save" class="btn-settings-save">保存</button>
+                <button id="btn-session-delete" class="btn-outline btn-danger">workspace を削除</button>
+              </div>
+            </section>
+
+            <section id="agent-settings-section" class="settings-section" hidden>
+              <h3 id="agent-settings-title">agent 設定</h3>
+              <p id="agent-settings-note" class="settings-hint"></p>
+              <div class="settings-form two-col">
+                <label>名前 (固定)</label>
+                <input id="agent-name-input" type="text" class="settings-input" readonly />
+                <label id="agent-type-display-label">CLI 種類 (作成後固定)</label>
+                <select id="agent-type-display" class="settings-input" disabled></select>
+                  <label>model</label>
+                  <div id="agent-model-controls" class="settings-stack">
+                    <select id="agent-model-input" class="settings-input"></select>
+                    <select id="agent-model-detail-input" class="settings-input" hidden></select>
+                    <div id="agent-model-hint" class="settings-hint settings-inline-hint" hidden></div>
+                  </div>
+                <label>workdir</label>
+                <input id="agent-workdir-input" type="text" class="settings-input" />
+                <label id="agent-reasoning-input-label" hidden>reasoning</label>
+                <select id="agent-reasoning-input" class="settings-input" hidden></select>
+                <label id="agent-fast-mode-input-label" hidden>fast</label>
+                <select id="agent-fast-mode-input" class="settings-input" hidden></select>
+                <label id="agent-plan-mode-label" title="対応 CLI では最初に /plan などの切り替えコマンドを使う設定です">起動時モード</label>
+                <div id="agent-plan-mode-controls" class="settings-stack">
+                  <select id="agent-plan-mode-input" class="settings-input"></select>
+                  <div class="settings-hint settings-inline-hint">対応 CLI のみ。通常は Off のままで大丈夫です。</div>
+                  <div id="agent-plan-mode-hint" class="settings-hint settings-inline-hint" hidden></div>
+                </div>
+                <label title="この agent に毎回追加する補足指示です">追加 instructions</label>
+                <div class="settings-stack">
+                  <textarea id="agent-instructions-input" class="settings-input settings-textarea" rows="5" placeholder="例: 返答は日本語。まず結論から簡潔に書く。"></textarea>
+                  <div class="settings-hint settings-inline-hint">この agent に毎回付ける固定メモです。空欄でも使えます。</div>
+                </div>
+              </div>
+              <div class="settings-actions">
+                <button id="btn-agent-save" class="btn-settings-save">保存</button>
+                <button id="btn-agent-delete" class="btn-outline btn-danger">agent を削除</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="tab-agents">
+          <div class="agents-screen">
+            <div class="agents-screen-header">
+              <h2 class="settings-title">🧩 Agents</h2>
+              <p class="settings-hint">一覧確認と custom agent 作成。歯車で個別設定へ移動できます。</p>
+            </div>
+            <div class="agents-layout">
+              <div id="agents-list" class="agents-list"></div>
+              <div class="agents-create-card">
+                <h3>agent 作成</h3>
+                <div class="settings-form two-col">
+                  <label>名前</label>
+                  <input id="agents-create-name" type="text" class="settings-input" placeholder="例: reviewer" />
+                  <label>CLI</label>
+                  <select id="agents-create-type" class="settings-input">
+                    <option value="gemini">gemini</option>
+                    <option value="claude">claude</option>
+                    <option value="copilot">copilot</option>
+                    <option value="codex">codex</option>
+                  </select>
+                  <label>model</label>
+                  <div id="agents-create-model-controls" class="settings-stack">
+                    <select id="agents-create-model" class="settings-input"></select>
+                    <select id="agents-create-model-detail" class="settings-input" hidden></select>
+                    <div id="agents-create-model-hint" class="settings-hint settings-inline-hint" hidden></div>
+                  </div>
+                  <label>workdir</label>
+                  <input id="agents-create-workdir" type="text" class="settings-input" placeholder="任意" />
+                  <label id="agents-create-reasoning-label" hidden>reasoning</label>
+                  <select id="agents-create-reasoning" class="settings-input" hidden></select>
+                  <label id="agents-create-fast-mode-label" hidden>fast</label>
+                  <select id="agents-create-fast-mode" class="settings-input" hidden></select>
+                  <label id="agents-create-plan-mode-label" title="対応 CLI では最初に /plan などの切り替えコマンドを使う設定です">起動時モード</label>
+                  <div id="agents-create-plan-mode-controls" class="settings-stack">
+                    <select id="agents-create-plan-mode" class="settings-input"></select>
+                    <div class="settings-hint settings-inline-hint">対応 CLI のみ。通常は Off のままで大丈夫です。</div>
+                    <div id="agents-create-plan-mode-hint" class="settings-hint settings-inline-hint" hidden></div>
+                  </div>
+                  <label title="この agent に毎回追加する補足指示です">追加 instructions</label>
+                  <div class="settings-stack">
+                    <textarea id="agents-create-instructions" class="settings-input settings-textarea" rows="5" placeholder="例: 返答は日本語。まず結論から簡潔に書く。"></textarea>
+                    <div class="settings-hint settings-inline-hint">この agent に毎回付ける固定メモです。空欄でも使えます。</div>
+                  </div>
+                </div>
+                <div class="settings-actions">
+                  <button id="btn-agent-create" class="btn-settings-save">agent を作成</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/xterm/xterm.js"></script>
+    <script src="/xterm/addon-fit.js"></script>
+    <script src="/xterm/addon-search.js"></script>
+    <script src="/xterm/addon-web-links.js"></script>
+    <script src="/multiCLI-discord-base.js?v=0.1.68" type="module"></script>
+  </body>
+</html>

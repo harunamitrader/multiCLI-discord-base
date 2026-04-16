@@ -1,518 +1,308 @@
-![Codex Discord Connected Display header](header.jpg)
+![multiCLI-discord-base header](header.jpg)
 
-# Codex Discord Connected Display
+# multiCLI-discord-base
 
-Codex Discord Connected Display は、1つの Codex CLI セッションを
+multiCLI-discord-base は、**persistent interactive PTY** を主経路にした Windows 向けのローカル AI ワークスペースです。  
+Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル UI / Terminal / Discord / Schedule で同じ PTY を共有する**形で運用できます。
 
-- PC 上のローカル UI
-- Discord の指定チャンネル
+> **最初に読んでください**  
+> multiCLI-discord-base はローカル PC 上で CLI を直接実行し、作業ディレクトリのファイルやプロンプトを扱います。公開サーバー用途ではありません。導入前に `SECURITY.md` を確認してください。
 
-の両方から共有して使うための、Windows 向けローカルアプリです。略称は `CoDiCoDi` です。
+## この README の前提
 
-このリポジトリは、現時点の動作する状態をオープンソースとして公開するためのスナップショットです。すでに実用はできますが、まだ改修途中の部分もあります。
+- この README では `<repository-root>` を、このリポジトリを clone したフォルダとして表記します。
+- **正式名称は multiCLI-discord-base** ですが、ローカルのフォルダ名は任意です。今のチェックアウト先が `...\multicodi` のままでも動作します。
+- UI の正式ファイル名は `ui\multiCLI-discord-base.html` です。
 
-## 重要: 先に安全上の注意を読んでください
+## できること
 
-このアプリは便利ですが、かなり強い権限を持つローカルツールです。
+- ワークスペースを作成し、親 agent を 1 つ選んで作業を始める
+- 同じワークスペース内に子 agent を追加する
+- main chat から bare prompt を親 agent に送る
+- `agentName? prompt` で子 agent に送る
+- **`${workspaceId}:${agentName}`** 単位の shared PTY を Chat / Terminal / Discord / Schedule で共有する
+- Discord channel と workspace を 1:1 で紐づける
+- Discord から plain prompt / explicit agent prompt / 添付ファイルを同じ PTY に流す
+- 途中応答を UI / Discord に段階的に反映する
+- scheduler から既存 workspace agent へ定期実行する
+- custom agent を UI から追加・編集する
 
-- 入力した文章、画像、添付ファイル、保存済みファイルのパスを Codex CLI に渡します
-- 会話内容を Discord に送ります
-- 設定によっては、Codex に外部ネットワークアクセスを許可します
-- 設定によっては、Codex を承認なし・sandbox 制限なしで実行します
-- 設定によっては、監視フォルダ内で変更されたファイルを Discord に自動投稿します
+## 今の仕様で重要な前提
 
-設定を誤ると、機密情報の流出、不要なファイル送信、Discord Bot の乗っ取り、ローカル PC 上の危険な操作につながる可能性があります。
+1. 主経路は **headless one-shot 実行ではなく persistent interactive PTY** です。
+2. PTY key は **`${workspaceId}:${agentName}`** です。
+3. Chat / Terminal / Discord / Schedule は、同じ workspace x agent の**同じ stdin/stdout**を共有します。
+4. Discord は **1 channel ↔ 1 workspace** です。
+5. binding のない channel では、plain message で勝手に workspace を作りません。
+6. Discord slash command は廃止済みです。`!help`、`!status`、`!new`、`workspace?`、`agents?`、`stop?`、`agentName? prompt` を使います。
 
-特に次の使い方は避けてください。
+## 対応 CLI
 
-- 公開 Discord サーバーで使う
-- 信頼できない人が書き込めるチャンネルで使う
-- 機密データが大量に入った PC で、設定を理解しないまま使う
-- ローカル bridge を外部ネットワークへ公開する
+- `gemini`
+- `claude`
+- `copilot`
+- `codex`
 
-まずは [SECURITY.md](SECURITY.md) を読んでください。
+agent 定義の初期例は `config\agents.example.json` にあります。
 
-## おすすめの導入方法
+## 動作環境
 
-codex等のAIチャットに以下のプロンプトを入力してください。
+- Windows
+- Node.js 22 以上
+- npm
+- 利用したい CLI 本体のインストールとログイン
+- Discord 連携を使う場合は Discord Bot
 
-```text
-https://github.com/harunamitrader/codicodiを導入して。可能な範囲でAI側で作業を行い、必要な情報があれば質問して。手動で行う必要があるものは丁寧にやり方を教えて。Tauri デスクトップアプリとして起動できるようにデスクトップにショートカットを作成して
-```
-
-この方法なら、非エンジニアの人でも「どこを自分で触る必要があるか」を分けながら進めやすいです。特におすすめの導線は、**インストーラーを使わずに、このリポジトリをそのまま Tauri デスクトップアプリとして起動する方法**です。
-
-## このプロジェクトでできること
-
-現時点では、主に次のことができます。
-
-- セッションの新規作成、切り替え、名前変更、削除
-- ローカル UI と Discord で同じ Codex セッションを共有
-- ローカル UI / Discord の両方から文章を送信
-- ローカル UI / Discord の両方から画像を送信
-- ローカル UI / Discord の両方からファイルを送信
-- セッションごとに model / reasoning / fast mode を切り替え
-- 実行中の Codex を停止
-- UI と Discord に進捗表示
-- 再起動後の stale session 復旧と `Restore Chat`
-- 途中メッセージやコマンド実行メッセージの表示
-- キュー待ちターン数の表示
-- ローカル UI での drag & drop / paste 添付
-- セッションごとの working directory 切り替え
-- cron スケジュールで既存セッションまたは新規セッションへ定期送信
-- 開発者コンソール表示
-- Discord チャンネルとセッションの紐付け
-- 指定フォルダ配下のファイル変更を Discord に通知
-- Tauri デスクトップアプリとして起動
-
-補足:
-
-- Codex の `review` 実行機能は、現時点では UI / bridge ともに提供していません
-
-## 想定している使い方
-
-このプロジェクトは、次のような人を想定しています。
-
-- Windows で Codex CLI を使っている
-- Discord とローカル UI の両方から同じ作業セッションを続けたい
-- `.env` や Discord Bot 設定を自分で管理できる
-
-逆に、次の用途には向いていません。
-
-- 一般ユーザー向けの完成品アプリとして使う
-- 不特定多数が使う共有サービスにする
-- セキュリティを厳密に求める企業向けシステムとして使う
-- インターネット公開サービスにする
-
-## 全体構成
-
-このプロジェクトは大きく 3 つの層に分かれています。
-
-1. `server/`
-   Node.js 製のローカル bridge 本体です。Codex CLI の起動、Discord 連携、SQLite 保存、添付ファイル保存、SSE 配信などを担当します。
-2. `ui/`
-   ブラウザ UI です。ローカルブラウザ表示と Tauri アプリ内表示の両方で使います。
-3. `src-tauri/`
-   Windows 用デスクトップラッパーです。bridge を自動起動して、専用ウィンドウで UI を開きます。
-
-詳しい仕様は [docs/SPECIFICATION.md](docs/SPECIFICATION.md) にまとめています。
-
-## 事前に必要なもの
-
-このアプリは単体では動きません。事前に以下が必要です。
-
-### 1. Windows PC
-
-現在は Windows 前提の実装です。
-
-### 2. Node.js
-
-`npm` が使える Node.js が必要です。
-
-推奨:
-
-- Node.js 22 LTS 以上
-
-確認方法:
+確認例:
 
 ```powershell
 node -v
 npm -v
-```
-
-### 3. Codex CLI
-
-このアプリは、あなたのローカル PC に入っている Codex CLI を呼び出して使います。
-
-先に次が通ることを確認してください。
-
-```powershell
+gemini --help
+claude --help
+copilot --help
 codex --help
 ```
 
-重要:
+## 非エンジニア向けのいちばん簡単な導入手順
 
-- このアプリ自体が AI を持っているわけではありません
-- 実際に動いているのはローカルの Codex CLI です
-- Codex CLI の導入とログインが済んでいないと動きません
+### 1. フォルダを用意する
 
-### 4. Discord Bot
+この README では、プロジェクトが次の場所にある前提で説明します。
 
-Discord 連携を使うには、自分の Discord Bot が必要です。
+`<repository-root>`
 
-なお、現状の実装では `.env` の `DISCORD_ALLOWED_GUILD_IDS` に **ちょうど1つの Discord サーバー ID** が入っていることを前提にしています。
+別の場所に置いた場合は、以降のコマンド中のパスを自分の環境に読み替えてください。
 
-## 導入手順
+### 2. PowerShell を開く
 
-ここでは、**インストーラーを使わずに Tauri デスクトップアプリとして起動する方法**をメイン導線として説明します。
-非エンジニアの人でも追いやすいように、順番に説明します。
+`<repository-root>` をエクスプローラーで開き、アドレスバーに `powershell` と入力して Enter を押すのが簡単です。
 
-### 手順 1. このプロジェクトを手元に置く
-
-Git を使う場合:
+### 3. 依存パッケージを入れる
 
 ```powershell
-git clone <GitHub のリポジトリ URL>
-cd codicodi
-```
-
-Git が分からない場合は、GitHub の `Code` ボタンから ZIP をダウンロードして展開してください。
-
-### 手順 2. Node.js の依存パッケージを入れる
-
-PowerShell でプロジェクトフォルダを開き、次を実行します。
-
-```powershell
+Set-Location "<repository-root>"
 npm install
 ```
 
-### 手順 3. Codex CLI が使えることを確認する
-
-PowerShell で次を実行します。
+### 4. 設定ファイルをコピーする
 
 ```powershell
-codex --help
+Copy-Item ".env.example" ".env"
+Copy-Item ".\config\cli-settings.example.json" ".\config\cli-settings.json"
+Copy-Item ".\config\agents.example.json" ".\config\agents.json"
+Copy-Item ".\config\app-settings.example.json" ".\config\app-settings.json"
 ```
 
-ここで失敗する場合は、先に Codex CLI のインストールとログインを済ませてください。
+### 5. `.env` を埋める
 
-### 手順 4. Discord Bot を作成する
+`<repository-root>\.env` をメモ帳などで開きます。最小構成は次です。
 
-1. Discord Developer Portal を開く
-2. 新しい Application を作る
-3. `Bot` タブを開く
-4. Bot を作成する
-5. Bot Token をコピーする
-6. `Message Content Intent` を有効にする
-
-このトークンはあとで `.env` に設定します。漏洩すると Bot を乗っ取られる可能性があるため、絶対に公開しないでください。
-
-### 手順 5. Bot を Discord サーバーに招待する
-
-Developer Portal の `OAuth2` -> `URL Generator` で、以下を設定してください。
-
-Scope:
-
-- `bot`
-- `applications.commands`
-
-Permission の目安:
-
-- `View Channels`
-- `Send Messages`
-- `Read Message History`
-- `Add Reactions`
-- `Attach Files`
-
-生成された URL を開き、自分の Discord サーバーへ Bot を追加します。
-
-公開サーバーではなく、自分専用か、十分に信頼できるサーバーで使ってください。
-
-### 手順 6. Discord の Developer Mode を有効にする
-
-サーバー ID やチャンネル ID を取るために必要です。
-
-Discord で:
-
-1. `ユーザー設定`
-2. `詳細設定`
-3. `Developer Mode` を ON
-
-その後、
-
-- サーバーを右クリックして `Copy Server ID`
-- 必要ならチャンネルを右クリックして `Copy Channel ID`
-
-を行います。
-
-### 手順 7. `.env` を作る
-
-まず、サンプルファイルをコピーします。
-
-```powershell
-Copy-Item .env.example .env
-```
-
-その後、`.env` をテキストエディタで開いて、最低限次を埋めてください。
-
-```env
+```dotenv
 PORT=3087
 HOST=127.0.0.1
-CODEX_COMMAND=codex
-CODEX_WORKDIR=C:\Users\your-name\Desktop\codex
-CODEX_ENABLE_SEARCH=true
-CODEX_BYPASS_APPROVALS_AND_SANDBOX=true
 DATA_DIR=./data
-DISCORD_BOT_TOKEN=your-bot-token
-DISCORD_ALLOWED_GUILD_IDS=your-server-id
+
+DISCORD_BOT_TOKEN=
+DISCORD_ALLOWED_GUILD_IDS=
 DISCORD_ALLOWED_CHANNEL_IDS=
-DISCORD_STATUS_UPDATES=true
+
 FILE_WATCH_ENABLED=false
 FILE_WATCH_ROOT=
 FILE_LOG_CHANNEL_ID=
 ```
 
-主な意味:
+補足:
 
-- `CODEX_COMMAND`
-  Codex CLI を起動するコマンド名です。通常は `codex` のままで大丈夫です。
-- `CODEX_WORKDIR`
-  Codex が標準で作業するフォルダです。UI から選べる作業フォルダや、スケジュール実行時の既定フォルダはこの配下に制限されます。
-- `DISCORD_BOT_TOKEN`
-  自分の Discord Bot Token です。絶対に GitHub に上げないでください。
-- `DISCORD_ALLOWED_GUILD_IDS`
-  現在の実装では 1 つだけ指定します。
-- `DISCORD_ALLOWED_CHANNEL_IDS`
-  空欄なら、そのサーバー内の選択可能チャンネル一覧から選べます。指定すると、その ID のチャンネルだけを使えるように絞れます。
+- `PORT=3087` が既定です。すでに別ポートを使っているなら変更して構いません。
+- Discord を使わないなら `DISCORD_*` は空欄でも起動できます。
+- `DISCORD_ALLOWED_GUILD_IDS` は、今の実装では **1 つの guild ID** を入れる運用を前提にしています。
 
-### 手順 8. Tauri デスクトップアプリとして起動する
+### 6. CLI 設定を確認する
 
-このプロジェクトでは、まずこの起動方法をおすすめします。
+`config\cli-settings.json` で CLI コマンドや Codex の既定作業ディレクトリを確認します。
 
-PowerShell で次を実行します。
+例:
 
-```powershell
-.\launch-tauri-dev.ps1
+```json
+{
+  "commands": {
+    "claude": "claude",
+    "gemini": "gemini",
+    "copilot": "copilot",
+    "codex": "codex"
+  }
+}
 ```
 
-または、同じ内容を直接実行しても構いません。
+CLI のコマンド名が違う場合だけ修正してください。
+
+### 7. agent 定義を確認する
+
+`config\agents.json` で、最初に使いたい agent を決めます。1 agent だけにしておくと、workspace 作成時に親 agent が自動選択されやすくなります。
+
+### 8. 起動する
+
+もっとも簡単な起動方法:
 
 ```powershell
-npm run tauri:dev
+Set-Location "<repository-root>"
+.\start-multiCLI-discord-base.bat
 ```
 
-注意:
+これで server を起動し、health check 成功後に UI を開きます。
 
-- 現時点の Tauri 版も、内部ではローカルの Node.js と Codex CLI を前提にしています
-- つまり、完全な単独バイナリではなく、ローカル bridge を起動するデスクトップラッパーです
-- Tauri 版ではウィンドウを閉じる前に確認ダイアログが表示されます
+### 9. 開く URL
 
-### 手順 9. 代替: ブラウザから起動する
+既定値のままなら:
 
-サーバーだけ起動するなら次を実行します。
+- `http://127.0.0.1:3087/multiCLI-discord-base.html`
 
-```powershell
-npm run start
-```
+`.env` の `PORT` や `HOST` を変えた場合は、その値に合わせて開いてください。
 
-ブラウザまでまとめて開くなら、次の補助スクリプトも使えます。
+## AI に導入してもらうときのおすすめプロンプト
 
-```powershell
-.\launch-browser.ps1
-```
+CoDiCoDi README の導線にならって、**「AI ができる作業は AI にやってもらい、人が必要な情報だけ答える」**形にすると進めやすいです。
 
-または:
-
-```powershell
-.\launch-browser.cmd
-```
-
-手動で開く場合は、ブラウザで次を開きます。
+### 汎用テンプレート
 
 ```text
-http://127.0.0.1:3087
+<repository-root> にある multiCLI-discord-base をセットアップして。
+まず README と SECURITY.md を読んで、PowerShell 前提で進めて。
+できる作業は AI 側で進め、必要な情報だけ順番に質問して。
+Discord Bot の作成や CLI ログインなど、人が手でやる必要がある部分は、非エンジニア向けに丁寧に案内して。
+最後に <repository-root>\start-multiCLI-discord-base.bat で起動できる状態にして、必要ならデスクトップショートカットも作って。
 ```
 
-### 手順 10. 任意: build 済み exe を直接起動する
+### Discord も含めて任せるテンプレート
 
-インストーラーは使わず、build 済みの release exe を直接起動したい場合は、`npm run tauri:build` 実行後に `launch-direct.ps1` を使えます。
-
-```powershell
-npm run tauri:build
-.\launch-direct.ps1
+```text
+<repository-root> の multiCLI-discord-base を導入して。
+Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI のうち、今このPCで使えるものを確認して、設定ファイルも整えて。
+Discord 連携まで使いたいので、必要になったタイミングで
+1. Discord Bot Token
+2. 許可する Discord guild ID
+3. 必要なら channel ID
+だけを質問して。
+そのほかはできるだけ自動で進めて、最後に動作確認の手順も書いて。
 ```
 
-## Codex の実行モード設定
+### うまく進めるコツ
 
-codicodi はチャット内で承認ダイアログを操作する機能がないため、フルオートで動作させる設定が必要です。`.env` で以下の3パターンから選んでください。
+- AI には**今の実フォルダ**を明示する
+- **PowerShell 前提**と書く
+- **できる作業は AI 側で進める**と明示する
+- **手作業が必要な箇所は非エンジニア向けに説明して**と書く
+- 最後に **`<repository-root>\start-multiCLI-discord-base.bat` で起動確認まで**依頼する
 
-### ★ 推奨: フルオート＋安全網あり
+## Discord を使う場合の設定
 
-```env
-CODEX_BYPASS_APPROVALS_AND_SANDBOX=false
-CODEX_APPROVAL_POLICY=never
-CODEX_SANDBOX_MODE=workspace-write
-CODEX_WORKDIR=C:\Users\yourname\Desktop\AI\repos\myproject
+### 1. Discord Bot を作る
+
+1. Discord Developer Portal を開く
+2. Application を新規作成する
+3. `Bot` タブで Bot を作る
+4. Token をコピーする
+5. `Message Content Intent` を ON にする
+
+### 2. Bot を guild に招待する
+
+必要な権限の目安:
+
+- View Channels
+- Send Messages
+- Read Message History
+- Add Reactions
+- Attach Files
+
+### 3. guild ID を控える
+
+Developer Mode を ON にして、使う guild の ID をコピーします。
+
+### 4. `.env` を更新する
+
+```dotenv
+DISCORD_BOT_TOKEN=ここにBotトークン
+DISCORD_ALLOWED_GUILD_IDS=ここにguild ID
+DISCORD_ALLOWED_CHANNEL_IDS=
 ```
 
-承認プロンプトなし、かつ `CODEX_WORKDIR` 外への書き込みをサンドボックスが制限します。
-
-**さらに安全にするための運用ポイント:**
-
-- `CODEX_WORKDIR` はプロジェクト単位の狭いフォルダを指定する（広い親フォルダにしない）
-- `CODEX_WORKDIR` を Git リポジトリにしておくと、承認なしで動いた変更を `git diff` / `git restore` で確認・巻き戻しできる
-
-この設定を使う場合、`CODEX_WORKDIR` に指定したフォルダを Codex CLI の設定で trusted にしてください。
-
-```toml
-# ~/.codex/config.toml
-[projects.'C:\Users\yourname\Desktop\AI\repos\myproject']
-trust_level = "trusted"
-```
-
-### 次点: フルオート＋最低限の安全網
-
-```env
-CODEX_BYPASS_APPROVALS_AND_SANDBOX=false
-CODEX_APPROVAL_POLICY=never
-CODEX_SANDBOX_MODE=workspace-write
-CODEX_WORKDIR=C:\Users\yourname\Desktop\AI
-```
-
-推奨と仕組みは同じですが、`CODEX_WORKDIR` が広いフォルダの場合、サンドボックスの制限範囲も広くなります。
-
-### ⚠️ 最終手段: 制限なし
-
-```env
-CODEX_BYPASS_APPROVALS_AND_SANDBOX=true
-```
-
-承認プロンプトとサンドボックスを**完全に無効化**します。Codex は PC 上のあらゆるフォルダへの書き込みや、意図しないコマンドの実行が可能になります。
-
-誤ったプロンプトや予期しない動作で **重要ファイルの削除・上書きが起きても巻き戻しができません。** 他の設定で動かない場合の最終手段として使ってください。
-
-> **共通の注意:** いずれのパターンも、信頼できるプロンプトを送る前提での設定です。不特定多数が書き込めるチャンネルでは使わないでください。
-
-## アプリの使い方
+## 使い方
 
 ### ローカル UI
 
-ローカル UI では次の操作ができます。
+1. workspace を作成する
+2. 親 agent を 1 つ選ぶ
+3. Chat で bare prompt を送ると親 agent に入る
+4. `agentName? prompt` で子 agent に送る
+5. agent カードを開くと、その agent の Terminal を見られる
 
-- `New Session` で新規セッション作成
-- セッションカードをクリックして名前変更
-- Discord Channel カードをクリックしてチャンネル紐付け
-- Model / Reasoning / Fast mode の切り替え
-- `Select Folder` でセッションごとの working directory 切り替え
-- メッセージ送信
-- ファイル追加
-- drag & drop / paste での添付追加
-- 実行中停止
-- `Restore Chat` による DB からの会話再取得と stale session 復旧
-- `Open Developer Console`
-- `Schedules` 画面で cron スケジュールの追加 / 編集 / 停止 / 削除
-- スケジュールごとの送信先を「既存セッション」または「新規セッション作成」から選択
-- セッション削除
+### Discord
 
-### Discord コマンド
+主なコマンド:
 
-現在の slash command は次の通りです。
-
-- `/codex help`
-- `/codex session`
-- `/codex session number:1`
-- `/codex new`
-- `/codex rename name:新しい名前`
-- `/codex status`
-- `/codex model`
-- `/codex model number:1`
-- `/codex reasoning`
-- `/codex reasoning number:2`
-- `/codex fast on`
-- `/codex fast off`
-- `/codex stop`
-
-進捗表示について:
-
-- Discord の `Working` 進捗は、前の進捗メッセージを削除してから、新しい `Working` / `Completed` / `Stopped` / `Error` を末尾へ送ります
-- `stop` は実行中の turn だけでなく未処理キューも止め、Discord 側にも停止結果を通知します
-
-旧形式のテキストコマンド:
-
+- `!help`
 - `!status`
 - `!new`
-- `!bind <sessionId>`
+- `workspace? <名前>`
+- `agents?`
+- `stop?`
+- `agentName? <prompt>`
+- plain `<prompt>`（binding 済み channel の parent agent へ送信）
 
-### 添付ファイル
+重要:
 
-- 画像は Codex CLI の `--image` で渡します
-- 画像以外のファイルはローカルに保存し、その保存パスをプロンプトに追記して Codex に見せます
-- ローカル UI ではファイル picker に加えて drag & drop / paste に対応しています
-- 保存場所は `data/uploads/` です
+- binding のない channel では、plain message だけでは workspace を自動作成しません
+- workspace を作るか紐づけるには `!new` または `workspace? <名前>` を使います
+- slash command は廃止済みです
 
-### ファイル変更通知
+## 主要ファイル
 
-`.env` で有効にすると、指定フォルダ配下の
+### 起動・画面
 
-- 新規作成
-- 変更
-- 削除
+- `start-multiCLI-discord-base.bat`
+- `start-multiCLI-discord-base.ps1`
+- `launch-browser.ps1`
+- `ui\multiCLI-discord-base.html`
+- `ui\multiCLI-discord-base.js`
+- `ui\multiCLI-discord-base.css`
 
-を Discord の専用ログチャンネルへ通知できます。
+### サーバー
 
-新規作成と変更については、サイズ制限内ならファイル自体も添付されます。
+- `server\src\index.js`
+- `server\src\http-server.js`
+- `server\src\pty-service.js`
+- `server\src\agent-bridge.js`
+- `server\src\discord-adapter.js`
 
-## このアプリが保存するデータ
+### 設定
 
-このアプリは、標準ではプロジェクトフォルダ内にデータを保存します。
-
-主な保存先:
-
-- `data/bridge.sqlite`
-  セッション情報とイベント履歴
-- `data/uploads/`
-  添付ファイル
-- `data/logs/`
-  developer console 用ログ
 - `.env`
-  Bot Token や設定値
+- `config\cli-settings.json`
+- `config\agents.json`
+- `config\app-settings.json`
 
-これらを誰かに見られると、会話内容、ファイル名、添付ファイル、設定、作業履歴が漏れる可能性があります。
+### ドキュメント
 
-## 安全に使うためのチェックリスト
-
-実運用前に、最低限これを確認してください。
-
-- 自分が管理する Windows PC で使う
-- 自分が管理する Discord サーバーで使う
-- Bot のアクセスチャンネルを必要最小限にする
-- `.env` を Git に入れない
-- Bot Token が漏れたらすぐ再発行する
-- 機密ファイルがあるフォルダを監視対象にしない
-- `CODEX_ENABLE_SEARCH` と `CODEX_BYPASS_APPROVALS_AND_SANDBOX` を理解して使う
-- bridge のポートを外部へ公開しない
+- `docs\MULTI_CLI_SPEC.md`
+- `docs\discord-integration-status.md`
+- `docs\discord-multiCLI-discord-base-test-plan.md`
+- `SECURITY.md`
 
 ## 現在の制約
 
-現在の制約は次の通りです。
+- Windows 前提です
+- agent rename は未対応です
+- 既存の agent type は作成後固定です
+- Discord は 1 channel ↔ 1 workspace です
+- ブラウザ自動操作で Discord を触るときは、fresh tab のほうが安定します
 
-- Windows 前提の実装が多い
-- Tauri 版も Node.js と Codex CLI のローカル導入が必要
-- 複数人共用の安全なサービスとしては設計されていない
-- 厳密な認証や権限管理はない
-- インターネット公開用途は想定していない
+## 現在の検証状態
 
-## オープンソース公開用に含めているファイル
+- repo 回帰 suite: `scripts\test-multiCLI-discord-base-extended.mjs`
+- 最新結果: **171 通過 / 0 失敗**
+- stress test 台帳: **done 261 / pending 0**
 
-- [README.md](README.md)
-  導入手順と概要
-- [docs/SPECIFICATION.md](docs/SPECIFICATION.md)
-  現時点の仕様書
-- [SECURITY.md](SECURITY.md)
-  セキュリティ上の注意
-- [NOTICE.md](NOTICE.md)
-  商標・第三者ソフトウェアに関する注意
-- [LICENSE](LICENSE)
-  ライセンス原文
-- [LICENSE.ja.md](LICENSE.ja.md)
-  ライセンスの日本語説明
-- [CHANGELOG.md](CHANGELOG.md)
-  変更履歴
-- [launch-direct.ps1](launch-direct.ps1)
-  build 済みの Tauri exe を直接起動する補助スクリプト
-- [launch-tauri-dev.ps1](launch-tauri-dev.ps1)
-  Tauri 開発モード起動スクリプト
+## ライセンス
 
-## 責任範囲について
-
-このプロジェクトを使う場合、最終的な責任は利用者にあります。
-
-特に次については、利用者自身が管理してください。
-
-- Codex / OpenAI 側の利用条件
-- Discord Bot の設定と保護
-- ローカル PC の安全性
-- 送信するファイルやメッセージの内容
-- 外部サービスの規約順守
-
-このリポジトリは OpenAI、Discord、Tauri の公式プロジェクトではありません。
+MIT License. 詳細は `LICENSE` を確認してください。

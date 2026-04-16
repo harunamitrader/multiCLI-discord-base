@@ -2,13 +2,12 @@
 
 ## このリポジトリについて
 
-このリポジトリは `Codex Discord Connected Display (CoDiCoDi)` という独立したオープンソースプロジェクトです。
+このリポジトリは `multiCLI-discord-base` という独立したオープンソースプロジェクトです。
 
 以下の公式プロジェクトではありません。
 
 - OpenAI
 - Discord
-- Tauri
 
 ## 商標について
 
@@ -17,7 +16,12 @@
 - OpenAI
 - Codex
 - Discord
-- Tauri
+- GitHub
+- Copilot
+- Anthropic
+- Claude
+- Google
+- Gemini
 - Microsoft
 
 本リポジトリでは、説明目的で名称を使用しています。
@@ -28,8 +32,6 @@
 
 - Node.js
 - Discord.js
-- Tauri
-- Cargo / Rust 依存クレート
 
 それぞれのライセンスは各権利者に帰属します。再配布する場合は、各依存関係のライセンス条件を確認してください。
 

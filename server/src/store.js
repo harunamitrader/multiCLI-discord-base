@@ -9,7 +9,7 @@ function parseSession(row) {
   return {
     id: row.id,
     title: row.title,
-    // Legacy field — kept for backward compat with codicodi bridge
+    // Legacy field — kept for backward compatibility with the legacy bridge
     codexThreadId: row.codex_thread_id,
     // Generalized session reference (all providers)
     providerSessionRef: row.provider_session_ref ?? row.codex_thread_id ?? null,
@@ -42,11 +42,21 @@ function parseEvent(row) {
 
 function parseAgent(row) {
   if (!row) return null;
+  let settings = {};
+  try {
+    settings = row.settings_json ? JSON.parse(row.settings_json) : {};
+  } catch {
+    settings = {};
+  }
   return {
     name: row.name,
     type: row.type,
     model: row.model,
     status: row.status,
+    enabled: row.enabled == null ? true : Boolean(row.enabled),
+    themeColor: row.theme_color ?? null,
+    settings,
+    source: settings?.source || "env",
     createdAt: row.created_at,
   };
 }
@@ -136,7 +146,7 @@ export class Store {
       ) AS user_prompt_count
     `;
 
-    // ---- Legacy session statements (codicodi互換) ----
+    // ---- Legacy session statements (legacy bridge compatibility) ----
     this.createSessionStatement = db.prepare(`
       INSERT INTO sessions (
         id, title, codex_thread_id, status,
@@ -180,20 +190,48 @@ export class Store {
 
     // ---- Agent statements ----
     this.upsertAgentStatement = db.prepare(`
-      INSERT INTO agents (name, type, model, status, created_at)
-      VALUES (?, ?, ?, ?, datetime('now'))
-      ON CONFLICT(name) DO UPDATE SET type=excluded.type, model=excluded.model
+      INSERT INTO agents (name, type, model, status, enabled, settings_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(name) DO UPDATE SET
+        type=excluded.type,
+        model=excluded.model,
+        status=excluded.status,
+        enabled=excluded.enabled,
+        settings_json=excluded.settings_json
     `);
     this.updateAgentStatusStatement = db.prepare(
       `UPDATE agents SET status=? WHERE name=?`
     );
+    this.updateAgentStatement = db.prepare(`
+      UPDATE agents
+      SET model=?, enabled=?, settings_json=?
+      WHERE name=?
+    `);
+    this.deleteAgentStatement = db.prepare(`DELETE FROM agents WHERE name=?`);
     this.getAgentStatement = db.prepare(`SELECT * FROM agents WHERE name=?`);
     this.listAgentsStatement = db.prepare(`SELECT * FROM agents ORDER BY name`);
+    this.deleteWorkspaceAgentsByAgentStatement = db.prepare(
+      `DELETE FROM workspace_agents WHERE agent_name=?`
+    );
+    this.deleteAgentSessionsByAgentStatement = db.prepare(
+      `DELETE FROM agent_sessions WHERE agent_name=?`
+    );
+    this.deleteRunsByAgentStatement = db.prepare(
+      `DELETE FROM runs WHERE agent_name=?`
+    );
+    this.deleteMessagesByAgentStatement = db.prepare(
+      `DELETE FROM messages WHERE agent_name=?`
+    );
+    this.clearDiscordDefaultAgentStatement = db.prepare(`
+      UPDATE workspace_discord_bindings
+      SET default_agent = NULL
+      WHERE default_agent=?
+    `);
 
     // ---- Workspace statements ----
     this.insertWorkspaceStatement = db.prepare(`
       INSERT INTO workspaces (id, name, workdir, is_active, created_at)
-      VALUES (?, ?, ?, 0, datetime('now'))
+      VALUES (?, ?, ?, ?, datetime('now'))
     `);
     this.getWorkspaceStatement = db.prepare(`SELECT * FROM workspaces WHERE id=?`);
     this.getWorkspaceByNameStatement = db.prepare(`SELECT * FROM workspaces WHERE name=?`);
@@ -204,10 +242,21 @@ export class Store {
     this.setActiveWorkspaceStatement = db.prepare(
       `UPDATE workspaces SET is_active=CASE WHEN id=? THEN 1 ELSE 0 END`
     );
+    this.clearActiveWorkspaceStatement = db.prepare(
+      `UPDATE workspaces SET is_active=0`
+    );
     this.updateWorkspaceStatement = db.prepare(
       `UPDATE workspaces SET name=?, workdir=? WHERE id=?`
     );
     this.deleteWorkspaceStatement = db.prepare(`DELETE FROM workspaces WHERE id=?`);
+    this.getAppSettingStatement = db.prepare(`SELECT value FROM app_settings WHERE key=?`);
+    this.upsertAppSettingStatement = db.prepare(`
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET
+        value=excluded.value,
+        updated_at=excluded.updated_at
+    `);
 
     // ---- AgentSession statements ----
     this.upsertAgentSessionStatement = db.prepare(`
@@ -278,6 +327,12 @@ export class Store {
     this.getDiscordBindingStatement = db.prepare(
       `SELECT * FROM workspace_discord_bindings WHERE discord_channel_id=?`
     );
+    this.listDiscordBindingsByWorkspaceStatement = db.prepare(
+      `SELECT * FROM workspace_discord_bindings WHERE workspace_id=? ORDER BY created_at ASC`
+    );
+    this.deleteDiscordBindingsByWorkspaceStatement = db.prepare(
+      `DELETE FROM workspace_discord_bindings WHERE workspace_id=?`
+    );
 
     // ---- Workspace agents statements (PTY-first membership) ----
     this.upsertWorkspaceAgentStatement = db.prepare(`
@@ -298,6 +353,18 @@ export class Store {
     this.countWorkspaceAgentsStatement = db.prepare(
       `SELECT COUNT(*) AS cnt FROM workspace_agents WHERE workspace_id=?`
     );
+    this.deleteWorkspaceAgentsByWorkspaceStatement = db.prepare(
+      `DELETE FROM workspace_agents WHERE workspace_id=?`
+    );
+    this.deleteAgentSessionsByWorkspaceStatement = db.prepare(
+      `DELETE FROM agent_sessions WHERE workspace_id=?`
+    );
+    this.deleteRunsByWorkspaceStatement = db.prepare(
+      `DELETE FROM runs WHERE workspace_id=?`
+    );
+    this.deleteMessagesByWorkspaceStatement = db.prepare(
+      `DELETE FROM messages WHERE workspace_id=?`
+    );
 
     // ---- Workspace-level messages (cross-agent timeline) ----
     this.listWorkspaceMessagesStatement = db.prepare(`
@@ -308,7 +375,7 @@ export class Store {
   }
 
   // ---------------------------------------------------------------------------
-  // Legacy session methods (codicodi互換 — bridge.js が使う)
+  // Legacy session methods (legacy bridge compatibility — bridge.js uses these)
   // ---------------------------------------------------------------------------
 
   createSession({ title, discordChannelId = null, discordChannelName = null, model, reasoningEffort, profile, workdir, serviceTier }) {
@@ -421,13 +488,44 @@ export class Store {
   // Agent methods
   // ---------------------------------------------------------------------------
 
-  upsertAgent({ name, type, model }) {
-    this.upsertAgentStatement.run(name, type, model ?? null, "stopped");
+  upsertAgent({ name, type, model, status = "stopped", enabled = true, settings = null }) {
+    this.upsertAgentStatement.run(
+      name,
+      type,
+      model ?? null,
+      status ?? "stopped",
+      enabled ? 1 : 0,
+      settings ? JSON.stringify(settings) : null,
+    );
     return parseAgent(this.getAgentStatement.get(name));
   }
 
   updateAgentStatus(name, status) {
     this.updateAgentStatusStatement.run(status, name);
+  }
+
+  updateAgent(name, { model, enabled, settings }) {
+    const current = this.getAgent(name);
+    if (!current) return null;
+    this.updateAgentStatement.run(
+      model ?? current.model ?? null,
+      enabled == null ? (current.enabled ? 1 : 0) : (enabled ? 1 : 0),
+      JSON.stringify(settings ?? current.settings ?? {}),
+      name,
+    );
+    return this.getAgent(name);
+  }
+
+  deleteAgent(name) {
+    const current = this.getAgent(name);
+    if (!current) return null;
+    this.deleteWorkspaceAgentsByAgentStatement.run(name);
+    this.deleteAgentSessionsByAgentStatement.run(name);
+    this.deleteRunsByAgentStatement.run(name);
+    this.deleteMessagesByAgentStatement.run(name);
+    this.clearDiscordDefaultAgentStatement.run(name);
+    this.deleteAgentStatement.run(name);
+    return current;
   }
 
   getAgent(name) {
@@ -443,7 +541,8 @@ export class Store {
   // ---------------------------------------------------------------------------
 
   createWorkspace({ id, name, workdir }) {
-    this.insertWorkspaceStatement.run(id ?? randomUUID(), name, workdir ?? null);
+    const isFirstWorkspace = this.listWorkspaces().length === 0 ? 1 : 0;
+    this.insertWorkspaceStatement.run(id ?? randomUUID(), name, workdir ?? null, isFirstWorkspace);
     return parseWorkspace(this.getWorkspaceByNameStatement.get(name));
   }
 
@@ -464,6 +563,10 @@ export class Store {
   }
 
   setActiveWorkspace(id) {
+    if (!id) {
+      this.clearActiveWorkspaceStatement.run();
+      return null;
+    }
     this.setActiveWorkspaceStatement.run(id);
     return this.getWorkspace(id);
   }
@@ -478,8 +581,33 @@ export class Store {
   deleteWorkspace(id) {
     const ws = this.getWorkspace(id);
     if (!ws) return null;
+    const remainingWorkspaces = this.listWorkspaces().filter((workspace) => workspace.id !== id);
+    const fallbackWorkspace = remainingWorkspaces[0] ?? null;
+    if (ws.isActive && fallbackWorkspace) {
+      this.setActiveWorkspaceStatement.run(fallbackWorkspace.id);
+    } else if (ws.isActive) {
+      this.clearActiveWorkspaceStatement.run();
+    }
+    this.deleteDiscordBindingsByWorkspaceStatement.run(id);
+    this.deleteMessagesByWorkspaceStatement.run(id);
+    this.deleteRunsByWorkspaceStatement.run(id);
+    this.deleteAgentSessionsByWorkspaceStatement.run(id);
+    this.deleteWorkspaceAgentsByWorkspaceStatement.run(id);
     this.deleteWorkspaceStatement.run(id);
     return ws;
+  }
+
+  getAppSettings() {
+    return {
+      defaultWorkdir: this.getAppSettingStatement.get("default_workdir")?.value ?? "",
+    };
+  }
+
+  updateAppSettings({ defaultWorkdir } = {}) {
+    if (defaultWorkdir !== undefined) {
+      this.upsertAppSettingStatement.run("default_workdir", defaultWorkdir ?? "");
+    }
+    return this.getAppSettings();
   }
 
   // ---------------------------------------------------------------------------
@@ -613,5 +741,13 @@ export class Store {
 
   getDiscordBinding(discordChannelId) {
     return parseDiscordBinding(this.getDiscordBindingStatement.get(discordChannelId));
+  }
+
+  deleteDiscordBindingsByWorkspace(workspaceId) {
+    this.deleteDiscordBindingsByWorkspaceStatement.run(workspaceId);
+  }
+
+  listDiscordBindingsByWorkspace(workspaceId) {
+    return this.listDiscordBindingsByWorkspaceStatement.all(workspaceId).map(parseDiscordBinding);
   }
 }

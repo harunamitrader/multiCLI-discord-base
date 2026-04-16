@@ -7,7 +7,43 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..", "..");
+const configDir = path.join(projectRoot, "config");
 const codexHome = path.join(os.homedir(), ".codex");
+
+const DEFAULT_APP_SETTINGS = Object.freeze({
+  discord: {
+    statusUpdates: true,
+    maxAttachmentsPerMessage: 5,
+    maxAttachmentBytes: 20 * 1024 * 1024,
+  },
+  fileWatch: {
+    debounceMs: 1000,
+    maxAttachmentBytes: 8 * 1024 * 1024,
+    ignore: [".git", "node_modules", "dist", ".next", "coverage"],
+  },
+});
+
+const DEFAULT_CLI_SETTINGS = Object.freeze({
+  commands: {
+    claude: "claude",
+    gemini: "gemini",
+    copilot: "copilot",
+    codex: "codex",
+  },
+  codex: {
+    workdir: projectRoot,
+    enableSearch: true,
+    approvalPolicy: null,
+    sandboxMode: null,
+    bypassApprovalsAndSandbox: true,
+    defaults: {
+      model: "",
+      reasoningEffort: "",
+      serviceTier: "flex",
+      profile: "default",
+    },
+  },
+});
 
 function parseIdList(value) {
   return new Set(
@@ -42,8 +78,52 @@ function parseOptionalString(value) {
   return normalized || null;
 }
 
+function parseOptionalNumber(value, fallback) {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
 function normalizeServiceTier(value) {
   return String(value || "").trim().toLowerCase() === "fast" ? "fast" : "flex";
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function mergeConfig(base, overrides) {
+  if (Array.isArray(base)) {
+    return Array.isArray(overrides) ? [...overrides] : [...base];
+  }
+  if (!isPlainObject(base)) {
+    return overrides === undefined ? base : overrides;
+  }
+
+  const result = { ...base };
+  if (!isPlainObject(overrides)) {
+    return result;
+  }
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      result[key] = [...value];
+      continue;
+    }
+    if (isPlainObject(value) && isPlainObject(base[key])) {
+      result[key] = mergeConfig(base[key], value);
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 function readJsonFile(filePath, fallback) {
@@ -56,6 +136,141 @@ function readJsonFile(filePath, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function resolvePathFromProject(value, fallback) {
+  const normalized = parseOptionalString(value);
+  if (!normalized) {
+    return fallback;
+  }
+  return path.isAbsolute(normalized)
+    ? path.normalize(normalized)
+    : path.resolve(projectRoot, normalized);
+}
+
+function normalizeAgentSettings(settings = {}) {
+  if (!isPlainObject(settings)) {
+    return {};
+  }
+
+  const next = {};
+  if ("workdir" in settings) next.workdir = String(settings.workdir || "").trim();
+  if ("instructions" in settings) next.instructions = String(settings.instructions || "").trim();
+  if ("reasoningEffort" in settings) next.reasoningEffort = String(settings.reasoningEffort || "").trim();
+  if ("planMode" in settings) next.planMode = String(settings.planMode || "").trim();
+  if ("fastMode" in settings) {
+    next.fastMode =
+      settings.fastMode === true || settings.fastMode === false
+        ? settings.fastMode
+        : String(settings.fastMode || "").trim();
+  }
+  return next;
+}
+
+function normalizeAgentDefinitions(rawValue) {
+  const sourceList = Array.isArray(rawValue)
+    ? rawValue
+    : Array.isArray(rawValue?.agents)
+      ? rawValue.agents
+      : [];
+  const seen = new Set();
+  const definitions = [];
+
+  for (const entry of sourceList) {
+    const name = String(entry?.name || "").trim().toLowerCase();
+    const type = String(entry?.type || "").trim().toLowerCase();
+    if (!name || !type || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    definitions.push({
+      name,
+      type,
+      model: String(entry?.model || "").trim(),
+      settings: normalizeAgentSettings(entry?.settings),
+    });
+  }
+
+  return definitions;
+}
+
+function readLegacyCliSettingsFromEnv() {
+  return {
+    commands: {
+      claude: parseOptionalString(process.env.CLAUDE_COMMAND),
+      gemini: parseOptionalString(process.env.GEMINI_COMMAND),
+      copilot: parseOptionalString(process.env.COPILOT_COMMAND),
+      codex: parseOptionalString(process.env.CODEX_COMMAND),
+    },
+    codex: {
+      workdir: parseOptionalString(process.env.CODEX_WORKDIR),
+      enableSearch:
+        process.env.CODEX_ENABLE_SEARCH == null ? undefined : parseBoolean(process.env.CODEX_ENABLE_SEARCH, true),
+      approvalPolicy: parseOptionalString(process.env.CODEX_APPROVAL_POLICY),
+      sandboxMode: parseOptionalString(process.env.CODEX_SANDBOX_MODE),
+      bypassApprovalsAndSandbox:
+        process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX == null
+          ? undefined
+          : parseBoolean(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX, true),
+      defaults: {
+        model: parseOptionalString(process.env.CODEX_MODEL),
+        reasoningEffort: parseOptionalString(process.env.CODEX_REASONING_EFFORT),
+        serviceTier: parseOptionalString(process.env.CODEX_SERVICE_TIER),
+        profile: parseOptionalString(process.env.CODEX_PROFILE),
+      },
+    },
+  };
+}
+
+function readLegacyAppSettingsFromEnv() {
+  return {
+    discord: {
+      statusUpdates:
+        process.env.DISCORD_STATUS_UPDATES == null
+          ? undefined
+          : parseBoolean(process.env.DISCORD_STATUS_UPDATES, true),
+      maxAttachmentsPerMessage: parseOptionalNumber(process.env.MAX_ATTACHMENTS_PER_MESSAGE, undefined),
+      maxAttachmentBytes: parseOptionalNumber(process.env.MAX_ATTACHMENT_BYTES, undefined),
+    },
+    fileWatch: {
+      debounceMs: parseOptionalNumber(process.env.FILE_WATCH_DEBOUNCE_MS, undefined),
+      maxAttachmentBytes: parseOptionalNumber(process.env.FILE_WATCH_MAX_ATTACHMENT_BYTES, undefined),
+      ignore:
+        process.env.FILE_WATCH_IGNORE == null
+          ? undefined
+          : parseStringList(process.env.FILE_WATCH_IGNORE),
+    },
+  };
+}
+
+function readLegacyAgentsFromEnv() {
+  const prefix = "AGENT_";
+  const names = new Set();
+
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith(prefix)) continue;
+    const rest = key.slice(prefix.length);
+    const underIdx = rest.lastIndexOf("_");
+    if (underIdx < 1) continue;
+    names.add(rest.slice(0, underIdx).toLowerCase());
+  }
+
+  return [...names]
+    .map((name) => {
+      const envPrefix = `AGENT_${name.toUpperCase()}_`;
+      return {
+        name,
+        type: String(process.env[`${envPrefix}TYPE`] || "").trim().toLowerCase(),
+        model: String(process.env[`${envPrefix}MODEL`] || "").trim(),
+        settings: {},
+      };
+    })
+    .filter((entry) => entry.name && entry.type);
 }
 
 function readCodexConfigValue(key) {
@@ -166,44 +381,109 @@ function loadAppVersion() {
   return packageJson.version || "unknown";
 }
 
+function loadAppSettingsConfig(appSettingsPath) {
+  const fromFile = readJsonFile(appSettingsPath, {});
+  const merged = mergeConfig(
+    cloneJson(DEFAULT_APP_SETTINGS),
+    mergeConfig(readLegacyAppSettingsFromEnv(), fromFile),
+  );
+  return {
+    discord: {
+      statusUpdates: Boolean(merged.discord?.statusUpdates ?? true),
+      maxAttachmentsPerMessage: parseOptionalNumber(merged.discord?.maxAttachmentsPerMessage, 5),
+      maxAttachmentBytes: parseOptionalNumber(merged.discord?.maxAttachmentBytes, 20 * 1024 * 1024),
+    },
+    fileWatch: {
+      debounceMs: parseOptionalNumber(merged.fileWatch?.debounceMs, 1000),
+      maxAttachmentBytes: parseOptionalNumber(merged.fileWatch?.maxAttachmentBytes, 8 * 1024 * 1024),
+      ignore: Array.isArray(merged.fileWatch?.ignore)
+        ? merged.fileWatch.ignore.map((item) => String(item).trim()).filter(Boolean)
+        : [...DEFAULT_APP_SETTINGS.fileWatch.ignore],
+    },
+  };
+}
+
+function loadCliSettingsConfig(cliSettingsPath, availableModels) {
+  const fromFile = readJsonFile(cliSettingsPath, {});
+  const merged = mergeConfig(
+    cloneJson(DEFAULT_CLI_SETTINGS),
+    mergeConfig(readLegacyCliSettingsFromEnv(), fromFile),
+  );
+  const commands = {
+    claude: parseOptionalString(merged.commands?.claude) || "claude",
+    gemini: parseOptionalString(merged.commands?.gemini) || "gemini",
+    copilot: parseOptionalString(merged.commands?.copilot) || "copilot",
+    codex: parseOptionalString(merged.commands?.codex) || "codex",
+  };
+  const codexWorkdir = resolvePathFromProject(
+    merged.codex?.workdir,
+    projectRoot,
+  );
+
+  if (!fs.existsSync(codexWorkdir)) {
+    throw new Error(`Configured Codex workdir was not found: ${codexWorkdir}`);
+  }
+
+  if (!fs.statSync(codexWorkdir).isDirectory()) {
+    throw new Error(`Configured Codex workdir is not a directory: ${codexWorkdir}`);
+  }
+
+  const defaultModel =
+    parseOptionalString(merged.codex?.defaults?.model) ||
+    readCodexConfigValue("model") ||
+    availableModels[0]?.slug ||
+    "gpt-5.4";
+  const defaultReasoningEffort =
+    parseOptionalString(merged.codex?.defaults?.reasoningEffort) ||
+    readCodexConfigValue("model_reasoning_effort") ||
+    "medium";
+  const defaultServiceTier = normalizeServiceTier(
+    merged.codex?.defaults?.serviceTier || readCodexConfigValue("service_tier") || "flex",
+  );
+  const defaultProfile = parseOptionalString(merged.codex?.defaults?.profile) || "default";
+
+  return {
+    commands,
+    codex: {
+      workdir: codexWorkdir,
+      enableSearch: merged.codex?.enableSearch !== false,
+      approvalPolicy: parseOptionalString(merged.codex?.approvalPolicy),
+      sandboxMode: parseOptionalString(merged.codex?.sandboxMode),
+      bypassApprovalsAndSandbox: merged.codex?.bypassApprovalsAndSandbox !== false,
+      defaults: {
+        model: defaultModel,
+        reasoningEffort: defaultReasoningEffort,
+        serviceTier: defaultServiceTier,
+        profile: defaultProfile,
+      },
+    },
+  };
+}
+
 export function loadConfig() {
+  const appSettingsPath = path.join(configDir, "app-settings.json");
+  const cliSettingsPath = path.join(configDir, "cli-settings.json");
+  const agentsConfigPath = path.join(configDir, "agents.json");
   const dataDir = path.resolve(projectRoot, process.env.DATA_DIR || "data");
   const uiDir = path.resolve(projectRoot, "ui");
   const uploadsDir = path.join(dataDir, "uploads");
   const logsDir = path.join(dataDir, "logs");
   const schedulesDir = path.join(dataDir, "schedules");
   const scheduleDefaultsPath = path.join(dataDir, "schedule-defaults.json");
-  const codexWorkdir = path.resolve(
-    process.env.CODEX_WORKDIR || path.join(os.homedir(), "Desktop", "codex"),
-  );
-  if (!fs.existsSync(codexWorkdir)) {
-    throw new Error(`Configured CODEX_WORKDIR was not found: ${codexWorkdir}`);
-  }
-
-  if (!fs.statSync(codexWorkdir).isDirectory()) {
-    throw new Error(`Configured CODEX_WORKDIR is not a directory: ${codexWorkdir}`);
-  }
-
   const availableModels = loadAvailableModels();
-  const defaultModel =
-    process.env.CODEX_MODEL ||
-    readCodexConfigValue("model") ||
-    availableModels[0]?.slug ||
-    "gpt-5.4";
-  const defaultReasoningEffort =
-    process.env.CODEX_REASONING_EFFORT ||
-    readCodexConfigValue("model_reasoning_effort") ||
-    "medium";
-  const defaultServiceTier =
-    normalizeServiceTier(
-      process.env.CODEX_SERVICE_TIER || readCodexConfigValue("service_tier") || "flex",
-    );
-  const defaultProfile = process.env.CODEX_PROFILE || "default";
+  const cliSettings = loadCliSettingsConfig(cliSettingsPath, availableModels);
+  const appSettings = loadAppSettingsConfig(appSettingsPath);
+  const configuredAgents = normalizeAgentDefinitions(
+    fs.existsSync(agentsConfigPath)
+      ? readJsonFile(agentsConfigPath, {})
+      : readLegacyAgentsFromEnv(),
+  );
+  const discordBotToken = String(process.env.DISCORD_BOT_TOKEN || "").trim();
   const discordAllowedGuildIds = parseIdList(process.env.DISCORD_ALLOWED_GUILD_IDS);
   const fileWatchEnabled = parseBoolean(process.env.FILE_WATCH_ENABLED, false);
   const fileWatchRoot = parseOptionalString(process.env.FILE_WATCH_ROOT);
   const fileLogChannelId = parseOptionalString(process.env.FILE_LOG_CHANNEL_ID);
-  if (discordAllowedGuildIds.size !== 1) {
+  if (discordBotToken && discordAllowedGuildIds.size !== 1) {
     throw new Error(
       "DISCORD_ALLOWED_GUILD_IDS must contain exactly one guild ID.",
     );
@@ -226,7 +506,7 @@ export function loadConfig() {
       throw new Error(`Configured FILE_WATCH_ROOT is not a directory: ${fileWatchRoot}`);
     }
 
-    if (!(process.env.DISCORD_BOT_TOKEN || "").trim()) {
+    if (!discordBotToken) {
       throw new Error("DISCORD_BOT_TOKEN is required when FILE_WATCH_ENABLED is true.");
     }
   }
@@ -245,43 +525,51 @@ export function loadConfig() {
     scheduleDefaultsPath,
     databasePath: path.join(dataDir, "bridge.sqlite"),
     uiDir,
-    codexCommand: process.env.CODEX_COMMAND || "codex",
+    configDir,
+    configFiles: {
+      appSettingsPath,
+      cliSettingsPath,
+      agentsConfigPath,
+    },
+    claudeCommand: cliSettings.commands.claude,
+    geminiCommand: cliSettings.commands.gemini,
+    copilotCommand: cliSettings.commands.copilot,
+    codexCommand: cliSettings.commands.codex,
     codexHome,
-    codexWorkdir,
-    codexSearchEnabled: parseBoolean(process.env.CODEX_ENABLE_SEARCH, true),
-    codexApprovalPolicy: parseOptionalString(process.env.CODEX_APPROVAL_POLICY),
-    codexSandboxMode: parseOptionalString(process.env.CODEX_SANDBOX_MODE),
-    codexBypassApprovalsAndSandbox: parseBoolean(
-      process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX,
-      true,
-    ),
+    codexWorkdir: cliSettings.codex.workdir,
+    codexSearchEnabled: cliSettings.codex.enableSearch,
+    codexApprovalPolicy: cliSettings.codex.approvalPolicy,
+    codexSandboxMode: cliSettings.codex.sandboxMode,
+    codexBypassApprovalsAndSandbox: cliSettings.codex.bypassApprovalsAndSandbox,
     codexDeveloperLogPath: path.join(logsDir, "codex-live.log"),
     scheduleLogPath: path.join(logsDir, "schedule-runs.log"),
     appVersion: loadAppVersion(),
-    codexVersion: loadCodexVersion(process.env.CODEX_COMMAND || "codex"),
+    codexVersion: loadCodexVersion(cliSettings.commands.codex),
     codexDefaults: {
-      model: defaultModel,
-      reasoningEffort: defaultReasoningEffort,
-      serviceTier: defaultServiceTier,
-      profile: defaultProfile,
-      workdir: codexWorkdir,
+      model: cliSettings.codex.defaults.model,
+      reasoningEffort: cliSettings.codex.defaults.reasoningEffort,
+      serviceTier: cliSettings.codex.defaults.serviceTier,
+      profile: cliSettings.codex.defaults.profile,
+      workdir: cliSettings.codex.workdir,
     },
     availableModels,
-    discordBotToken: process.env.DISCORD_BOT_TOKEN || "",
+    configuredAgents,
+    saveAgentDefinitions(definitions) {
+      const normalized = normalizeAgentDefinitions(definitions);
+      writeJsonFile(agentsConfigPath, { agents: normalized });
+      return normalized;
+    },
+    discordBotToken,
     discordAllowedGuildIds,
     discordAllowedChannelIds: parseIdList(process.env.DISCORD_ALLOWED_CHANNEL_IDS),
-    discordStatusUpdates: parseBoolean(process.env.DISCORD_STATUS_UPDATES, true),
-    maxAttachmentsPerMessage: Number(process.env.MAX_ATTACHMENTS_PER_MESSAGE || 5),
-    maxAttachmentBytes: Number(process.env.MAX_ATTACHMENT_BYTES || 20 * 1024 * 1024),
+    discordStatusUpdates: appSettings.discord.statusUpdates,
+    maxAttachmentsPerMessage: appSettings.discord.maxAttachmentsPerMessage,
+    maxAttachmentBytes: appSettings.discord.maxAttachmentBytes,
     fileWatchEnabled,
     fileWatchRoot: fileWatchRoot ? path.resolve(fileWatchRoot) : null,
     fileLogChannelId,
-    fileWatchDebounceMs: Number(process.env.FILE_WATCH_DEBOUNCE_MS || 1000),
-    fileWatchMaxAttachmentBytes: Number(
-      process.env.FILE_WATCH_MAX_ATTACHMENT_BYTES || 8 * 1024 * 1024,
-    ),
-    fileWatchIgnore: parseStringList(
-      process.env.FILE_WATCH_IGNORE || ".git,node_modules,dist,.next,coverage",
-    ),
+    fileWatchDebounceMs: appSettings.fileWatch.debounceMs,
+    fileWatchMaxAttachmentBytes: appSettings.fileWatch.maxAttachmentBytes,
+    fileWatchIgnore: appSettings.fileWatch.ignore,
   };
 }

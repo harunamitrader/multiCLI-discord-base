@@ -166,6 +166,52 @@ export function normalizeGeminiEvent(raw, agentName) {
 }
 
 /**
+ * Normalize GitHub Copilot CLI JSON events → CanonicalEvent[]
+ */
+export function normalizeCopilotEvent(raw, agentName) {
+  const events = [];
+
+  if (raw.type === "assistant.message_delta" && raw.data?.deltaContent) {
+    events.push({ type: "message.delta", agentName, content: String(raw.data.deltaContent) });
+  }
+
+  if (raw.type === "assistant.message" && raw.data?.content != null) {
+    events.push({ type: "message.done", agentName, content: String(raw.data.content) });
+  }
+
+  if (raw.type === "result") {
+    if (raw.sessionId) {
+      events.push({
+        type: "session.init",
+        agentName,
+        sessionRef: raw.sessionId,
+        model: "",
+      });
+    }
+    events.push({
+      type: "run.done",
+      agentName,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        durationMs: raw.usage?.totalApiDurationMs,
+      },
+    });
+  }
+
+  if (raw.type === "error") {
+    events.push({
+      type: "run.error",
+      agentName,
+      message: raw.message ?? raw.data?.message ?? "GitHub Copilot CLI error",
+    });
+  }
+
+  return events;
+}
+
+/**
  * Normalize Codex CLI exec --json events → CanonicalEvent[]
  */
 export function normalizeCodexEvent(raw, agentName) {

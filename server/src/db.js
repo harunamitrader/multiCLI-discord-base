@@ -13,7 +13,7 @@ function ensureColumn(db, tableName, columnName, definition) {
 export function createDatabase(databasePath, sessionDefaults) {
   const db = new DatabaseSync(databasePath);
 
-  // --- Legacy tables (codicodi互換) ---
+  // --- Legacy tables (legacy bridge compatibility) ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
@@ -44,7 +44,7 @@ export function createDatabase(databasePath, sessionDefaults) {
     ON session_events(session_id, created_at);
   `);
 
-  // --- New multicodi tables ---
+  // --- New multiCLI-discord-base tables ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS agents (
       name       TEXT PRIMARY KEY,
@@ -104,6 +104,12 @@ export function createDatabase(databasePath, sessionDefaults) {
       workspace_id       TEXT NOT NULL,
       default_agent      TEXT,
       created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE INDEX IF NOT EXISTS idx_runs_agent_workspace
@@ -166,13 +172,34 @@ export function createDatabase(databasePath, sessionDefaults) {
     `);
   }
 
-  // Ensure default workspace exists
-  const defaultWs = db.prepare("SELECT id FROM workspaces WHERE name = 'default'").get();
-  if (!defaultWs) {
+  const activeWorkspace = db.prepare("SELECT id FROM workspaces WHERE is_active = 1 LIMIT 1").get();
+  if (!activeWorkspace) {
+    const firstWorkspace = db.prepare("SELECT id FROM workspaces ORDER BY created_at ASC, name ASC LIMIT 1").get();
+    if (firstWorkspace?.id) {
+      db.prepare(`
+        UPDATE workspaces
+        SET is_active = CASE WHEN id = ? THEN 1 ELSE 0 END
+      `).run(firstWorkspace.id);
+    }
+  }
+
+  const defaultWorkdirSetting = db.prepare(`
+    SELECT value FROM app_settings WHERE key = 'default_workdir'
+  `).get();
+  const legacyDefaultWorkspace = db.prepare(`
+    SELECT workdir FROM workspaces WHERE id = 'default' OR name = 'default' LIMIT 1
+  `).get();
+  if (
+    (!defaultWorkdirSetting || !String(defaultWorkdirSetting.value || "").trim()) &&
+    String(legacyDefaultWorkspace?.workdir || "").trim()
+  ) {
     db.prepare(`
-      INSERT INTO workspaces (id, name, is_active, created_at)
-      VALUES ('default', 'default', 1, datetime('now'))
-    `).run();
+      INSERT INTO app_settings (key, value, updated_at)
+      VALUES ('default_workdir', ?, datetime('now'))
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(String(legacyDefaultWorkspace.workdir).trim());
   }
 
   return db;

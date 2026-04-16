@@ -1,11 +1,11 @@
 ---
 name: schedule-manager
-description: Manage CoDiCoDi cron jobs stored as JSON files in data/schedules. Use this skill when the user wants to create, edit, pause, resume, list, or delete scheduled prompts, or when they mention cron, periodic execution, schedules, or automation for CoDiCoDi sessions.
+description: Manage multiCLI-discord-base cron jobs stored as JSON files in data/schedules. Use this skill when the user wants to create, edit, pause, resume, list, or delete scheduled prompts, or when they mention cron, periodic execution, schedules, or automation for multiCLI-discord-base sessions.
 ---
 
 # Schedule Manager
 
-Use this skill only for CoDiCoDi schedule files in `data/schedules/`.
+Use this skill only for multiCLI-discord-base schedule files in `data/schedules/`.
 
 ## What To Manage
 
@@ -25,7 +25,7 @@ Each job is one JSON file:
 - Required fields: `cron`, `prompt`
 - Optional fields: `session`, `timezone`, `active`
 - Cron must use 5 fields.
-- If `session` is omitted, CoDiCoDi uses the active session fallback.
+- If `session` is omitted, multiCLI-discord-base uses the active session fallback.
 - Default timezone is `Asia/Tokyo`.
 - `active: false` means paused.
 

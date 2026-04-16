@@ -1,6 +1,6 @@
 # ライセンスについて
 
-`Codex Discord Connected Display (CoDiCoDi)` のライセンス原文は [LICENSE](LICENSE) です。
+`multiCLI-discord-base` のライセンス原文は [LICENSE](LICENSE) です。
 
 法的な解釈が必要な場合は、必ず原文の `LICENSE` を優先してください。
 

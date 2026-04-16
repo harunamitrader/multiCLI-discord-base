@@ -229,6 +229,14 @@ function formatStoredTarget(target) {
     };
   }
 
+  if (target.type === "agent") {
+    return {
+      type: "agent",
+      workspaceId: target.workspaceId,
+      ...(target.agentName ? { agentName: target.agentName } : {}),
+    };
+  }
+
   return {
     type: "session",
     sessionId: target.sessionId,
@@ -247,6 +255,24 @@ function normalizeScheduleTargetObject(target) {
   if (!normalizedType || normalizedType === "spawn") {
     return {
       type: "spawn",
+    };
+  }
+
+  if (normalizedType === "agent") {
+    const workspaceId = normalizeScheduleReference(
+      target.workspaceId ?? target.workspace ?? target.workspaceReference,
+    );
+    const agentName = normalizeScheduleReference(
+      target.agentName ?? target.agent ?? target.defaultAgent,
+    );
+    if (!workspaceId) {
+      throw new Error("Schedule target workspaceId is required.");
+    }
+
+    return {
+      type: "agent",
+      workspaceId,
+      ...(agentName ? { agentName } : {}),
     };
   }
 
@@ -359,6 +385,10 @@ function normalizePersistedJob(name, input, existingJob = null) {
 function getTargetLogValue(target) {
   if (!target || target.type === "spawn") {
     return "spawn";
+  }
+
+  if (target.type === "agent") {
+    return `${target.workspaceId}:${target.agentName || "(parent)"}`;
   }
 
   return target.sessionId;
@@ -490,6 +520,50 @@ export class SchedulerService {
         targetSnapshot?.toLowerCase() === normalizedSessionTitle
       );
     });
+  }
+
+  listJobsReferencingWorkspace(workspaceId) {
+    const normalizedWorkspaceId = normalizeScheduleReference(workspaceId);
+    if (!normalizedWorkspaceId) {
+      return [];
+    }
+
+    return this.listJobs().filter((job) => {
+      if (job.target?.type !== "agent") {
+        return false;
+      }
+      return normalizeScheduleReference(job.target.workspaceId) === normalizedWorkspaceId;
+    });
+  }
+
+  listJobsReferencingAgent(agentName) {
+    const normalizedAgentName = normalizeScheduleReference(agentName);
+    if (!normalizedAgentName) {
+      return [];
+    }
+
+    return this.listJobs().filter((job) => {
+      if (job.target?.type !== "agent") {
+        return false;
+      }
+      return normalizeScheduleReference(job.target.agentName) === normalizedAgentName;
+    });
+  }
+
+  async removeJobsReferencingWorkspace(workspaceId) {
+    const jobs = this.listJobsReferencingWorkspace(workspaceId);
+    for (const job of jobs) {
+      await this.removeJob(job.name);
+    }
+    return jobs;
+  }
+
+  async removeJobsReferencingAgent(agentName) {
+    const jobs = this.listJobsReferencingAgent(agentName);
+    for (const job of jobs) {
+      await this.removeJob(job.name);
+    }
+    return jobs;
   }
 
   writeJobFile(name, job) {

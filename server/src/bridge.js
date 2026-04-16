@@ -945,7 +945,7 @@ export class BridgeService {
       eventType: "error.created",
       payload: {
         message:
-          "CoDiCoDi restarted while this session was still marked active. The in-flight run was reset to stopped, so please review the latest messages before retrying.",
+          "multiCLI-discord-base restarted while this session was still marked active. The in-flight run was reset to stopped, so please review the latest messages before retrying.",
       },
     });
 

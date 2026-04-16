@@ -1,9 +1,8 @@
-﻿import {
+import {
   ChannelType,
   Client,
   GatewayIntentBits,
   Partials,
-  SlashCommandBuilder,
 } from "discord.js";
 
 function splitMessage(text, maxLength = 1800) {
@@ -31,100 +30,6 @@ function splitMessage(text, maxLength = 1800) {
   return parts;
 }
 
-function buildSessionCommand() {
-  return new SlashCommandBuilder()
-    .setName("codex")
-    .setDescription("CoDiCoDi commands.")
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("session")
-        .setDescription("List sessions or bind this channel to one.")
-        .addIntegerOption((option) =>
-          option
-            .setName("number")
-            .setDescription("1-based session number from the /codex session list")
-            .setMinValue(1)
-            .setRequired(false),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("new")
-        .setDescription("Create and link a new session for this channel."),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("rename")
-        .setDescription("Rename the current session for this channel.")
-        .addStringOption((option) =>
-          option
-            .setName("name")
-            .setDescription("New session name")
-            .setRequired(true),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("status")
-        .setDescription("Show the current linked session status."),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("model")
-        .setDescription("List models or switch the current session model.")
-        .addIntegerOption((option) =>
-          option
-            .setName("number")
-            .setDescription("1-based model number from the /codex model list")
-            .setMinValue(1)
-            .setRequired(false),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("reasoning")
-        .setDescription("List reasoning levels or switch the current session reasoning level.")
-        .addIntegerOption((option) =>
-          option
-            .setName("number")
-            .setDescription("1-based reasoning level number from the /codex reasoning list")
-            .setMinValue(1)
-            .setRequired(false),
-        ),
-    )
-    .addSubcommandGroup((group) =>
-      group
-        .setName("fast")
-        .setDescription("Toggle fast mode for the current session.")
-        .addSubcommand((subcommand) =>
-          subcommand.setName("on").setDescription("Enable fast mode."),
-        )
-        .addSubcommand((subcommand) =>
-          subcommand.setName("off").setDescription("Disable fast mode."),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("stop")
-        .setDescription("Stop the current Codex generation for this channel."),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("last-message")
-        .setDescription("Recover the last missing AI message for the current session."),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("restart")
-        .setDescription("Restart the CoDiCoDi server."),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("help")
-        .setDescription("Show CoDiCoDi commands and examples."),
-    );
-}
-
 const WORKING_STATUSES = new Set(["queued", "running", "waiting_codex"]);
 
 function formatFastMode(session) {
@@ -141,6 +46,28 @@ function formatStatusMessage(session) {
   ].join("\n");
 }
 
+function formatWorkspaceStatusMessage(workspace, agentName) {
+  return [
+    `Workspace: ${workspace?.name || "unknown"}`,
+    `Workspace ID: ${workspace?.id || "unknown"}`,
+    `Agent: ${agentName || "unassigned"}`,
+  ].join("\n");
+}
+
+function formatDiscordHelpText() {
+  return [
+    "multiCLI-discord-base commands:",
+    "!help - このヘルプを表示",
+    "!new - このチャンネル名で新しい workspace を作成して紐づけ",
+    "!status - 現在の workspace 紐づけと agent を表示",
+    "workspace? <名前> - 既存 workspace に紐づけ、なければ新規作成",
+    "agents? - 利用可能 agent を表示",
+    "stop? - 進行中 agent を停止",
+    "agentName? <prompt> - 指定 agent に送信",
+    "<prompt> - 紐づけ済み workspace の parent agent に送信",
+  ].join("\n");
+}
+
 function getChannelDisplayName(channel) {
   return channel?.name || null;
 }
@@ -149,19 +76,21 @@ function getElapsedSeconds(startedAt) {
   return Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
 }
 
-function getWorkingDots() {
-  const frames = [".", "..", "..."];
-  return frames[Math.floor(Date.now() / 1000) % frames.length];
+function formatElapsedLabel(startedAt, { compactMinutes = false } = {}) {
+  const seconds = getElapsedSeconds(startedAt);
+  if (compactMinutes && seconds >= 60) {
+    return `${Math.floor(seconds / 60)}m`;
+  }
+  return `${seconds}s`;
 }
 
-function formatWorkingStatusContent(startedAt) {
-  return `> Working${getWorkingDots()} (${getElapsedSeconds(startedAt)}s)`;
+function formatWorkingStatusContent(startedAt, label = "Working") {
+  return `> ${label}... (${formatElapsedLabel(startedAt, { compactMinutes: true })})`;
 }
 
 function formatFinishedStatusContent(status, startedAt) {
-  const seconds = getElapsedSeconds(startedAt);
   const label = status[0].toUpperCase() + status.slice(1);
-  return `> ${label} (${seconds}s)`;
+  return `> ${label} (${formatElapsedLabel(startedAt)})`;
 }
 
 function formatQueuedNotice(turnsAhead) {
@@ -178,6 +107,30 @@ function formatQueuedNotice(turnsAhead) {
 
 function getProgressUpdateDelayMs(updateStep) {
   return updateStep < 4 ? 15000 : 60000;
+}
+
+function commonPrefixLength(a, b) {
+  const left = String(a ?? "");
+  const right = String(b ?? "");
+  const max = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < max && left[index] === right[index]) {
+    index += 1;
+  }
+  return index;
+}
+
+function getUnsyncedSuffix(fullText, syncedText) {
+  const normalizedFull = String(fullText ?? "");
+  const normalizedSynced = String(syncedText ?? "");
+  if (!normalizedSynced) {
+    return normalizedFull;
+  }
+  if (normalizedFull.startsWith(normalizedSynced)) {
+    return normalizedFull.slice(normalizedSynced.length);
+  }
+  const prefixLength = commonPrefixLength(normalizedFull, normalizedSynced);
+  return normalizedFull.slice(prefixLength);
 }
 
 function formatRunningCommandMessage(command) {
@@ -229,6 +182,48 @@ function formatScheduledInputMessage(payload) {
   }
 
   return lines.join("\n");
+}
+
+function formatWorkspaceBulletList(workspaces = []) {
+  const normalized = Array.isArray(workspaces) ? workspaces : [];
+  if (normalized.length === 0) {
+    return "（ワークスペースはまだありません）";
+  }
+  return normalized
+    .map((workspace) => `• ${workspace.name}${workspace.isActive ? " ✓" : ""}${workspace.id ? ` (\`${workspace.id}\`)` : ""}`)
+    .join("\n");
+}
+
+function buildPromptWithAttachmentPaths(text, attachments = []) {
+  const normalizedText = String(text || "").trim();
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  const imagePaths = normalizedAttachments
+    .filter((attachment) => attachment?.kind === "image" && attachment?.savedPath)
+    .map((attachment) => attachment.savedPath);
+  const filePaths = normalizedAttachments
+    .filter((attachment) => attachment?.kind !== "image" && attachment?.savedPath)
+    .map((attachment) => attachment.savedPath);
+  const sections = [];
+
+  if (normalizedText) {
+    sections.push(normalizedText);
+  }
+
+  if (imagePaths.length > 0) {
+    sections.push(`Images:\n${imagePaths.map((savedPath) => `- ${savedPath}`).join("\n")}`);
+  }
+
+  if (filePaths.length > 0) {
+    sections.push(`Files:\n${filePaths.map((savedPath) => `- ${savedPath}`).join("\n")}`);
+  }
+
+  if (!normalizedText && imagePaths.length > 0 && filePaths.length === 0) {
+    sections.unshift("Please inspect the attached image files.");
+  } else if (!normalizedText && imagePaths.length > 0 && filePaths.length > 0) {
+    sections.unshift("Please inspect the attached images and files.");
+  }
+
+  return sections.join("\n\n").trim();
 }
 
 /**
@@ -288,6 +283,8 @@ export class DiscordAdapter {
     this.client = null;
     this.unsubscribers = [];
     this.progressTrackers = new Map();
+    this.workspaceProgressTrackers = new Map();
+    this.workspacePromptQueues = new Map();
   }
 
   async start() {
@@ -311,7 +308,7 @@ export class DiscordAdapter {
         await this.registerSlashCommands();
         await this.syncDiscordChannelNames();
       } catch (error) {
-        console.error("Discord slash command registration failed:", error);
+        console.error("Discord command bootstrap failed:", error);
       }
     });
 
@@ -363,6 +360,38 @@ export class DiscordAdapter {
       }),
     );
 
+    this.unsubscribers.push(
+      this.bus.on("message.user", (event) => {
+        this.handleWorkspaceMessageUser(event).catch((error) => {
+          console.error("Discord workspace user mirror failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("message.done", (event) => {
+        this.handleWorkspaceMessageDone(event).catch((error) => {
+          console.error("Discord workspace assistant mirror failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("status.change", (event) => {
+        this.handleWorkspaceStatusChange(event).catch((error) => {
+          console.error("Discord workspace status mirror failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("run.error", (event) => {
+        this.handleWorkspaceRunError(event).catch((error) => {
+          console.error("Discord workspace error mirror failed:", error);
+        });
+      }),
+    );
+
     await this.client.login(this.config.discordBotToken);
   }
 
@@ -376,11 +405,41 @@ export class DiscordAdapter {
       clearTimeout(tracker.timeoutId);
     }
     this.progressTrackers.clear();
+    for (const tracker of this.workspaceProgressTrackers.values()) {
+      clearTimeout(tracker.timeoutId);
+    }
+    this.workspaceProgressTrackers.clear();
+    this.workspacePromptQueues.clear();
 
     if (this.client) {
       await this.client.destroy();
       this.client = null;
     }
+  }
+
+  getWorkspacePromptQueueKey(workspaceId, agentName) {
+    return `${String(workspaceId ?? "").trim()}:${String(agentName ?? "").trim()}`;
+  }
+
+  enqueueWorkspacePrompt({ workspaceId, agentName, task }) {
+    const key = this.getWorkspacePromptQueueKey(workspaceId, agentName);
+    const entry = this.workspacePromptQueues.get(key) ?? {
+      tail: Promise.resolve(),
+      pendingCount: 0,
+    };
+    const turnsAhead = entry.pendingCount;
+    entry.pendingCount += 1;
+    const previousTail = entry.tail.catch(() => undefined);
+    entry.tail = previousTail
+      .then(() => task())
+      .finally(() => {
+        entry.pendingCount = Math.max(0, entry.pendingCount - 1);
+        if (entry.pendingCount === 0) {
+          this.workspacePromptQueues.delete(key);
+        }
+      });
+    this.workspacePromptQueues.set(key, entry);
+    return { turnsAhead, promise: entry.tail };
   }
 
   isAllowedTarget(guildId, channelId) {
@@ -414,7 +473,7 @@ export class DiscordAdapter {
       return;
     }
 
-    const commands = [buildSessionCommand().toJSON()];
+    const commands = [];
 
     if (this.config.discordAllowedGuildIds.size > 0) {
       for (const guildId of this.config.discordAllowedGuildIds) {
@@ -753,6 +812,219 @@ export class DiscordAdapter {
     this.progressTrackers.delete(session.id);
   }
 
+  getWorkspaceDiscordBinding(workspaceId) {
+    const normalizedWorkspaceId = String(workspaceId ?? "").trim();
+    if (!normalizedWorkspaceId || !this.agentBridge?.store?.listDiscordBindingsByWorkspace) {
+      return null;
+    }
+    return this.agentBridge.store.listDiscordBindingsByWorkspace(normalizedWorkspaceId)[0] ?? null;
+  }
+
+  stopWorkspaceProgressTracker(workspaceId) {
+    const tracker = this.workspaceProgressTrackers.get(workspaceId);
+    if (!tracker) {
+      return;
+    }
+    clearTimeout(tracker.timeoutId);
+    this.workspaceProgressTrackers.delete(workspaceId);
+  }
+
+  markWorkspaceProgressTrackerHasTrailingMessages(workspaceId) {
+    const tracker = this.workspaceProgressTrackers.get(workspaceId);
+    if (!tracker?.messageId) {
+      return;
+    }
+    tracker.hasTrailingMessages = true;
+  }
+
+  async flushPendingWorkspaceProgress(workspaceId) {
+    const tracker = this.workspaceProgressTrackers.get(workspaceId);
+    if (!tracker?.pendingFinishedStatus || !tracker.channel) {
+      return;
+    }
+    const status = tracker.pendingFinishedStatus;
+    tracker.pendingFinishedStatus = null;
+    await this.replaceProgressMessage(tracker, formatFinishedStatusContent(status, tracker.startedAt));
+  }
+
+  scheduleWorkspaceProgressTrackerRefresh(workspaceId) {
+    const tracker = this.workspaceProgressTrackers.get(workspaceId);
+    if (!tracker) {
+      return;
+    }
+    const delayMs = getProgressUpdateDelayMs(tracker.updateStep);
+    tracker.timeoutId = setTimeout(() => {
+      this.refreshWorkspaceProgressTracker(workspaceId)
+        .then(() => {
+          const currentTracker = this.workspaceProgressTrackers.get(workspaceId);
+          if (!currentTracker) {
+            return;
+          }
+          currentTracker.updateStep += 1;
+          this.scheduleWorkspaceProgressTrackerRefresh(workspaceId);
+        })
+        .catch((error) => {
+          console.error("Discord workspace progress refresh failed:", error);
+          this.stopWorkspaceProgressTracker(workspaceId);
+        });
+    }, delayMs);
+  }
+
+  async refreshWorkspaceProgressTracker(workspaceId) {
+    const tracker = this.workspaceProgressTrackers.get(workspaceId);
+    if (!tracker?.channel) {
+      return;
+    }
+    try {
+      await this.publishProgressMessage(tracker, formatWorkingStatusContent(tracker.startedAt, tracker.label || "Working"));
+    } catch {
+      this.stopWorkspaceProgressTracker(workspaceId);
+    }
+  }
+
+  async startWorkspaceProgressTracker(workspaceId, agentName, createdAt) {
+    if (!this.client || !this.config.discordStatusUpdates) {
+      return;
+    }
+    const normalizedWorkspaceId = String(workspaceId ?? "").trim();
+    if (!normalizedWorkspaceId || this.workspaceProgressTrackers.get(normalizedWorkspaceId)) {
+      return;
+    }
+    const binding = this.getWorkspaceDiscordBinding(normalizedWorkspaceId);
+    if (!binding?.discordChannelId) {
+      return;
+    }
+    const tracker = {
+      startedAt: createdAt || new Date().toISOString(),
+      channel: null,
+      messageId: null,
+      timeoutId: null,
+      updateStep: 0,
+      hasTrailingMessages: false,
+      pendingFinishedStatus: null,
+      finalMessagePending: false,
+      label: agentName || "Working",
+    };
+    this.workspaceProgressTrackers.set(normalizedWorkspaceId, tracker);
+    const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) {
+      this.stopWorkspaceProgressTracker(normalizedWorkspaceId);
+      return;
+    }
+    tracker.channel = channel;
+    await this.replaceProgressMessage(tracker, formatWorkingStatusContent(tracker.startedAt, tracker.label));
+    this.scheduleWorkspaceProgressTrackerRefresh(normalizedWorkspaceId);
+  }
+
+  async finishWorkspaceProgressTracker(workspaceId, status, createdAt) {
+    const normalizedWorkspaceId = String(workspaceId ?? "").trim();
+    if (!normalizedWorkspaceId) {
+      return;
+    }
+    const tracker = this.workspaceProgressTrackers.get(normalizedWorkspaceId);
+    if (!tracker) {
+      const binding = this.getWorkspaceDiscordBinding(normalizedWorkspaceId);
+      if (!this.client || !binding?.discordChannelId) {
+        return;
+      }
+      const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+      if (!channel || !channel.isTextBased()) {
+        return;
+      }
+      await channel.send(formatFinishedStatusContent(status, createdAt || new Date().toISOString())).catch(() => null);
+      return;
+    }
+    clearTimeout(tracker.timeoutId);
+    tracker.pendingFinishedStatus = status;
+    if (tracker.finalMessagePending) {
+      return;
+    }
+    await this.flushPendingWorkspaceProgress(normalizedWorkspaceId);
+    this.workspaceProgressTrackers.delete(normalizedWorkspaceId);
+  }
+
+  async handleWorkspaceMessageUser(event) {
+    if (!this.client || !event?.workspaceId || event.source === "discord") {
+      return;
+    }
+    const binding = this.getWorkspaceDiscordBinding(event.workspaceId);
+    if (!binding?.discordChannelId) {
+      return;
+    }
+    const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+    if (event.source === "schedule") {
+      await channel.send(formatScheduledInputMessage({ schedulePrompt: event.content })).catch(() => null);
+      this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
+      return;
+    }
+    await channel.send(formatLocalInputMessage({ text: event.content })).catch(() => null);
+    this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
+  }
+
+  async handleWorkspaceMessageDone(event) {
+    if (!this.client || !event?.workspaceId || event.source === "discord") {
+      return;
+    }
+    const binding = this.getWorkspaceDiscordBinding(event.workspaceId);
+    if (!binding?.discordChannelId) {
+      return;
+    }
+    const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+    const tracker = this.workspaceProgressTrackers.get(event.workspaceId);
+    if (tracker) {
+      tracker.finalMessagePending = true;
+    }
+    try {
+      for (const chunk of splitMessage(String(event.content || "").trim())) {
+        if (!chunk) continue;
+        await channel.send(chunk).catch(() => null);
+      }
+      this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
+    } finally {
+      const currentTracker = this.workspaceProgressTrackers.get(event.workspaceId);
+      if (currentTracker) {
+        currentTracker.finalMessagePending = false;
+      }
+      await this.finishWorkspaceProgressTracker(event.workspaceId, event.finalStatus || "completed", event.createdAt);
+    }
+  }
+
+  async handleWorkspaceStatusChange(event) {
+    if (!event?.workspaceId || event.source === "discord" || !this.config.discordStatusUpdates) {
+      return;
+    }
+    if (WORKING_STATUSES.has(event.status)) {
+      await this.startWorkspaceProgressTracker(event.workspaceId, event.agentName, event.createdAt);
+      return;
+    }
+    if (["waiting_input", "error"].includes(event.status)) {
+      await this.finishWorkspaceProgressTracker(event.workspaceId, event.status, event.createdAt);
+    }
+  }
+
+  async handleWorkspaceRunError(event) {
+    if (!this.client || !event?.workspaceId || event.source === "discord") {
+      return;
+    }
+    const binding = this.getWorkspaceDiscordBinding(event.workspaceId);
+    if (!binding?.discordChannelId) {
+      return;
+    }
+    const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+    await channel.send(`Error: ${event.message}`).catch(() => null);
+    this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
+    await this.finishWorkspaceProgressTracker(event.workspaceId, "error", event.createdAt);
+  }
+
   async handleInteraction(interaction) {
     if (!interaction.isChatInputCommand()) {
       return;
@@ -766,66 +1038,11 @@ export class DiscordAdapter {
       return;
     }
 
-    if (interaction.commandName !== "codex") {
-      return;
-    }
-
-    const subcommandGroup = interaction.options.getSubcommandGroup(false);
-    const subcommand = interaction.options.getSubcommand();
-
-    if (subcommand === "session") {
-      await this.handleSessionSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "new") {
-      await this.handleNewSessionSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "rename") {
-      await this.handleRenameSessionSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "status") {
-      await this.handleStatusSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "model") {
-      await this.handleModelSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "reasoning") {
-      await this.handleReasoningSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommandGroup === "fast") {
-      await this.handleFastSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "stop") {
-      await this.handleStopSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "last-message") {
-      await this.handleLastMessageSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "restart") {
-      await this.handleRestartSlashCommand(interaction);
-      return;
-    }
-
-    if (subcommand === "help") {
-      await this.handleHelpSlashCommand(interaction);
-    }
+    await interaction.reply({
+      content:
+        "Slash commands は廃止されました。`!new`、`workspace? <名前>`、`agents?`、`stop?`、`agentName? <prompt>` を使ってください。",
+      ephemeral: true,
+    }).catch(() => null);
   }
 
   formatSessionLine(session, index, currentSessionId) {
@@ -890,19 +1107,11 @@ export class DiscordAdapter {
   }
 
   async handleNewSessionSlashCommand(interaction) {
-    const currentSession = this.getLinkedSession(interaction.channelId);
-    const session = this.bridge.createSession({
-      discordChannelId: interaction.channelId,
-      discordChannelName: getChannelDisplayName(interaction.channel) || "unknown",
-      model: currentSession?.model,
-      reasoningEffort: currentSession?.reasoningEffort,
-      profile: currentSession?.profile,
-      serviceTier: currentSession?.serviceTier,
-    });
-
-    await interaction.reply({
-      content: `Created and linked session \`${session.id}\` (${session.title}).`,
-      ephemeral: true,
+    const reply = async (content) => interaction.reply({ content, ephemeral: true });
+    await this.createOrBindWorkspaceFromChannel({
+      channelId: interaction.channelId,
+      channelName: getChannelDisplayName(interaction.channel) || interaction.channelId,
+      reply,
     });
   }
 
@@ -1111,7 +1320,7 @@ export class DiscordAdapter {
 
     await interaction.reply({
       content:
-        "Restarting the CoDiCoDi server now. If it was launched via codicodi-server.cmd or scripts/start-server.cmd, it will come back automatically.",
+        "Restarting the multiCLI-discord-base server now. If it was launched via start-multiCLI-discord-base.bat or scripts/start-server.cmd, it will come back automatically.",
       ephemeral: true,
     });
 
@@ -1170,40 +1379,317 @@ export class DiscordAdapter {
 
   async handleHelpSlashCommand(interaction) {
     await interaction.reply({
-      content:
-        [
-          "CoDiCoDi commands:",
-          "/codex help - Show this help message",
-          "/codex session - List connectable sessions",
-          "/codex session number:1 - Link this channel to a session",
-          "/codex new - Create and link a new session",
-          "/codex rename name:Project Alpha - Rename the current session",
-          "/codex status - Show the current session status",
-          "/codex model - List available models",
-          "/codex model number:1 - Switch the current session model",
-          "/codex reasoning - List reasoning levels for the current model",
-          "/codex reasoning number:2 - Switch the reasoning level",
-          "/codex fast on - Enable fast mode",
-          "/codex fast off - Disable fast mode",
-          "/codex stop - Stop the current generation",
-          "/codex last-message - Recover the last missing AI message for this session",
-          "/codex restart - Restart the CoDiCoDi server",
-          "",
-          "Legacy text commands:",
-          "!status - Show the linked session status",
-          "!new - Create and link a new session",
-          "!bind <sessionId> - Link this channel to an existing session",
-        ].join("\n"),
+      content: formatDiscordHelpText(),
       ephemeral: true,
     });
   }
 
   // ── Multi-agent command handler ───────────────────────────────────────────
 
-  async handleAgentCommand(message, cmd) {
+  resolveDiscordWorkspaceContext(channelId, requestedAgentName = null) {
+    const ab = this.agentBridge;
+    const binding = ab?.getDiscordBinding(channelId) ?? null;
+    const boundWorkspace = binding?.workspaceId
+      ? (ab?.getWorkspace?.(binding.workspaceId) ?? null)
+      : null;
+    const invalidBinding = Boolean(binding && !boundWorkspace);
+    const workspaceId = invalidBinding ? null : (boundWorkspace?.id || null);
+    const workspaceParentAgent = workspaceId ? (ab?.getWorkspaceParentAgent?.(workspaceId) ?? null) : null;
+    const registryAgents = this.agentRegistry?.list?.() ?? [];
+    const singleAgentName = registryAgents.length === 1 ? registryAgents[0].name : null;
+    const defaultAgent = invalidBinding
+      ? null
+      : (binding?.defaultAgent || workspaceParentAgent || (binding ? singleAgentName : null) || null);
+
+    return {
+      binding,
+      workspaceId,
+      defaultAgent,
+      agentName: invalidBinding ? null : (requestedAgentName || defaultAgent || null),
+      invalidBinding,
+    };
+  }
+
+  async replyWorkspaceBindingRequired(message, { binding, invalidBinding } = {}) {
+    const workspaces = this.agentBridge?.listWorkspaces?.() ?? [];
+    const workspaceList = formatWorkspaceBulletList(workspaces);
+    if (invalidBinding) {
+      await message.reply(
+        `⚠️ このチャンネルは削除済みワークスペース \`${binding?.workspaceId}\` に紐づいています。\n` +
+        `\`workspace? <名前>\` で再設定してください。\n\n` +
+        `**利用可能なワークスペース:**\n${workspaceList}`
+      );
+      return;
+    }
+    await message.reply(
+      "⚠️ このチャンネルはまだ workspace に紐づいていません。\n" +
+      "既存 workspace に接続するか、新しく作成してください。\n\n" +
+      "**使い方:**\n" +
+      "- `workspace? <名前>` : 既存 workspace に紐づけ、なければ新規作成\n" +
+      "- `!new` : このチャンネル名で新しい workspace を作成して紐づけ\n\n" +
+      `**利用可能なワークスペース:**\n${workspaceList}`
+    );
+  }
+
+  resolveDiscordWorkspaceCreateAgent() {
+    const ab = this.agentBridge;
+    const registryAgents = this.agentRegistry?.list?.() ?? [];
+    if (registryAgents.length === 1) {
+      return registryAgents[0]?.name || null;
+    }
+
+    const workspaces = ab?.listWorkspaces?.() ?? [];
+    const activeWorkspace = workspaces.find((workspace) => workspace?.isActive) ?? null;
+    const activeParentAgent = activeWorkspace
+      ? (ab?.getWorkspaceParentAgent?.(activeWorkspace.id) ?? null)
+      : null;
+    if (activeParentAgent) {
+      return activeParentAgent;
+    }
+
+    const distinctWorkspaceParents = [...new Set(
+      workspaces
+        .map((workspace) => (workspace?.id ? (ab?.getWorkspaceParentAgent?.(workspace.id) ?? null) : null))
+        .filter(Boolean),
+    )];
+    if (distinctWorkspaceParents.length === 1) {
+      return distinctWorkspaceParents[0];
+    }
+
+    return null;
+  }
+
+  async createOrBindWorkspaceFromChannel({ channelId, channelName, reply }) {
+    const ab = this.agentBridge;
+    const registry = this.agentRegistry;
+    if (!ab) {
+      await reply("AgentBridge が利用できません。");
+      return null;
+    }
+
+    const desiredName = String(channelName || channelId || "").trim() || `workspace-${channelId}`;
+    let workspace = ab.getWorkspaceByName(desiredName);
+    const context = this.resolveDiscordWorkspaceContext(channelId);
+    let parentAgent =
+      (workspace ? ab.getWorkspaceParentAgent(workspace.id) : null) ||
+      context.defaultAgent ||
+      this.resolveDiscordWorkspaceCreateAgent();
+
+    if (!workspace) {
+      if (!parentAgent) {
+        const agentList = registry?.list?.().map((item) => item.name).join(", ") || "なし";
+        await reply(
+          `複数エージェント構成のため、workspace 作成時の parentAgent を自動決定できません。\n` +
+          `\`workspace? <名前>\` を使ってください。候補 agent: ${agentList}`
+        );
+        return null;
+      }
+      workspace = ab.createWorkspace({ name: desiredName, parentAgent });
+      ab.bindDiscordChannel({
+        discordChannelId: channelId,
+        workspaceId: workspace.id,
+        defaultAgent: parentAgent || undefined,
+      });
+      await reply(`Started a new workspace: \`${workspace.id}\` (${workspace.name})`);
+      return workspace;
+    }
+
+    parentAgent = ab.getWorkspaceParentAgent(workspace.id) || parentAgent;
+    ab.bindDiscordChannel({
+      discordChannelId: channelId,
+      workspaceId: workspace.id,
+      defaultAgent: parentAgent || undefined,
+    });
+    await reply(`✅ このチャンネルをワークスペース **${workspace.name}** に紐づけました。`);
+    return workspace;
+  }
+
+  async saveDiscordMessageAttachments(storageKey, rawAttachments = []) {
+    const normalized = Array.isArray(rawAttachments) ? rawAttachments : [];
+    if (!this.attachments || normalized.length === 0) {
+      return [];
+    }
+    return this.attachments.saveDiscordAttachments(
+      storageKey,
+      normalized.map((attachment) => ({
+        url: attachment.url,
+        name: attachment.name || "attachment",
+        contentType: attachment.contentType || null,
+      })),
+    );
+  }
+
+  async runDiscordAgentPrompt({ message, agentName, workspaceId, prompt, rawAttachments = [] }) {
+    const registry = this.agentRegistry;
+    const ab = this.agentBridge;
+    const agent = registry?.get?.(agentName);
+    if (!agent) {
+      await message.reply(`エージェント \`${agentName}\` が見つかりません。`);
+      return;
+    }
+    const { turnsAhead, promise } = this.enqueueWorkspacePrompt({
+      workspaceId,
+      agentName,
+      task: async () => {
+        const startedAt = Date.now();
+        const tracker = {
+          progressMessage: null,
+          streamedText: "",
+          updateStep: 0,
+          timeoutId: null,
+          closed: false,
+        };
+        let progressQueue = Promise.resolve();
+        const workingLabel = `${agentName} working`;
+
+        const clearProgressTimer = () => {
+          if (tracker.timeoutId) {
+            clearTimeout(tracker.timeoutId);
+            tracker.timeoutId = null;
+          }
+        };
+        const enqueueProgressTask = (task) => {
+          progressQueue = progressQueue
+            .then(task)
+            .catch((error) => {
+              console.error("Discord live progress update failed:", error);
+            });
+          return progressQueue;
+        };
+        const replaceProgressMessage = async (content) => {
+          if (tracker.progressMessage?.delete) {
+            await tracker.progressMessage.delete().catch(() => null);
+          }
+          tracker.progressMessage = await message.channel.send(content).catch(() => null);
+          return tracker.progressMessage;
+        };
+        const scheduleProgressRefresh = () => {
+          clearProgressTimer();
+          if (tracker.closed) {
+            return;
+          }
+          const delayMs = getProgressUpdateDelayMs(tracker.updateStep);
+          tracker.timeoutId = setTimeout(() => {
+            tracker.updateStep += 1;
+            void enqueueProgressTask(async () => {
+              if (tracker.closed) {
+                return;
+              }
+              await replaceProgressMessage(formatWorkingStatusContent(startedAt, workingLabel));
+              scheduleProgressRefresh();
+            });
+          }, delayMs);
+        };
+        const refreshProgressTail = async () => {
+          if (tracker.closed) {
+            return;
+          }
+          await replaceProgressMessage(formatWorkingStatusContent(startedAt, workingLabel));
+        };
+        const sendSyncedText = async (content) => {
+          const suffix = getUnsyncedSuffix(content, tracker.streamedText);
+          if (!suffix.trim()) {
+            return;
+          }
+          const chunks = splitMessage(suffix, 1900);
+          for (const chunk of chunks) {
+            await message.channel.send(chunk).catch(() => null);
+          }
+          tracker.streamedText = `${tracker.streamedText}${suffix}`;
+          await refreshProgressTail();
+        };
+        const finishProgress = async (content) => {
+          clearProgressTimer();
+          tracker.closed = true;
+          await replaceProgressMessage(content);
+        };
+
+        await enqueueProgressTask(async () => {
+          await replaceProgressMessage(formatWorkingStatusContent(startedAt, workingLabel));
+          scheduleProgressRefresh();
+        });
+
+        const onProgress = async (event) => {
+          if (event.type === "message.delta") {
+            await enqueueProgressTask(async () => {
+              await sendSyncedText(event.content);
+            });
+            return;
+          }
+
+          if (event.type === "message.done") {
+            await enqueueProgressTask(async () => {
+              await sendSyncedText(event.content);
+            });
+          }
+        };
+
+        try {
+          const workdir = this.config.codexWorkdir;
+          const savedAttachments = await this.saveDiscordMessageAttachments(
+            workspaceId || `discord-${message.channelId}`,
+            rawAttachments,
+          );
+          const promptWithAttachments = buildPromptWithAttachmentPaths(prompt, savedAttachments);
+
+          let result;
+          if (ab) {
+            result = await ab.runPrompt({
+              agentName,
+              prompt: promptWithAttachments,
+              workspaceId,
+              workdir,
+              source: "discord",
+              discordMessageId: message.id,
+              onProgress,
+            });
+          } else {
+            const raw = await agent.run({ prompt: promptWithAttachments, workdir });
+            result = { text: raw.text, usage: raw.usage };
+          }
+
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          const { formatUsage } = await import("./pricing.js");
+          const usageLine = formatUsage(agent.model || agent.adapter?.defaultModel || "", result.usage);
+          await enqueueProgressTask(async () => {
+            await sendSyncedText(result.text);
+            await finishProgress(`> ✅ ${agentName} 完了 (${elapsed}s)${usageLine ? `\n> 📊 ${usageLine}` : ""}`);
+          });
+          await message.react("\u2611").catch(() => null);
+        } catch (err) {
+          clearProgressTimer();
+          if (err.cancelled) {
+            await enqueueProgressTask(async () => {
+              await finishProgress(`> ⏹ ${agentName} キャンセルされました。`);
+            });
+            return;
+          }
+          const errText = `> ❌ ${agentName} エラー: ${err.message}`;
+          await enqueueProgressTask(async () => {
+            await finishProgress(errText);
+          });
+        }
+      },
+    });
+    const queuedNotice = formatQueuedNotice(turnsAhead);
+    if (queuedNotice) {
+      await message.reply(queuedNotice).catch(() => null);
+    }
+    await promise;
+  }
+
+  async handleAgentCommand(message, cmd, rawAttachments = []) {
     const { agent: agentName, verb, prompt } = cmd;
     const registry = this.agentRegistry;
     const ab = this.agentBridge;
+    const ensureValidWorkspaceContext = async (requestedAgentName = null) => {
+      const context = this.resolveDiscordWorkspaceContext(message.channelId, requestedAgentName);
+      if (context.binding && !context.invalidBinding && context.workspaceId) {
+        return context;
+      }
+      await this.replyWorkspaceBindingRequired(message, context);
+      return null;
+    };
 
     // Global: "workspace?" — show or set channel↔workspace binding
     if (!agentName && verb === "workspace") {
@@ -1215,26 +1701,53 @@ export class DiscordAdapter {
 
       if (!prompt) {
         // Show current binding
-        const binding = ab.getDiscordBinding(channelId);
-        const ws = binding ? (ab.getWorkspace ? ab.store?.getWorkspace(binding.workspaceId) : null) : null;
-        const wsName = ws?.name ?? binding?.workspaceId ?? "なし";
+        const context = this.resolveDiscordWorkspaceContext(channelId);
+        const binding = context.binding;
+        const ws = binding && !context.invalidBinding ? (ab.getWorkspace?.(binding.workspaceId) ?? null) : null;
+        const wsName = context.invalidBinding
+          ? `${binding?.workspaceId} (deleted)`
+          : (ws?.name ?? binding?.workspaceId ?? "なし");
         const agentHint = binding?.defaultAgent ? ` (デフォルトエージェント: ${binding.defaultAgent})` : "";
-        const workspaces = ab.listWorkspaces().map((w) => `• ${w.name}${w.isActive ? " ✓" : ""}`).join("\n");
+        const workspaces = formatWorkspaceBulletList(ab.listWorkspaces());
+        const invalidHint = context.invalidBinding
+          ? "\n\n⚠️ この紐づけ先は削除済みです。`workspace? <名前>` で再設定してください。"
+          : "";
         await message.reply(
           `**このチャンネルのワークスペース:** ${wsName}${agentHint}\n\n` +
           `**利用可能なワークスペース:**\n${workspaces}\n\n` +
-          `変更するには: \`workspace? <名前>\``
+          `変更するには: \`workspace? <名前>\`${invalidHint}`
         );
         return;
       }
 
       // Bind to workspace by name (create if not exists)
+      const context = this.resolveDiscordWorkspaceContext(channelId);
       let workspace = ab.getWorkspaceByName(prompt);
+      let parentAgent =
+        (workspace ? ab.getWorkspaceParentAgent(workspace.id) : null) ||
+        context.defaultAgent ||
+        this.resolveDiscordWorkspaceCreateAgent();
+      const created = !workspace;
       if (!workspace) {
-        workspace = ab.createWorkspace({ name: prompt });
+        if (!parentAgent) {
+          const agentList = registry.list().map((item) => item.name).join(", ");
+          await message.reply(
+            `複数エージェント構成のため、workspace 作成時の parentAgent を自動決定できません。利用する agent を明示してください。候補: ${agentList}`
+          );
+          return;
+        }
+        workspace = ab.createWorkspace({ name: prompt, parentAgent });
       }
-      ab.bindDiscordChannel({ discordChannelId: channelId, workspaceId: workspace.id });
-      await message.reply(`✅ このチャンネルをワークスペース **${workspace.name}** に紐づけました。`);
+      ab.bindDiscordChannel({
+        discordChannelId: channelId,
+        workspaceId: workspace.id,
+        defaultAgent: parentAgent || undefined,
+      });
+      await message.reply(
+        created
+          ? `Started a new workspace: \`${workspace.id}\` (${workspace.name})`
+          : `✅ このチャンネルをワークスペース **${workspace.name}** に紐づけました。`
+      );
       return;
     }
 
@@ -1278,97 +1791,47 @@ export class DiscordAdapter {
 
     // "hanako stop?" — stop agent
     if (verb === "stop") {
-      ab ? ab.cancelAgent(agentName) : agent.cancel();
+      const context = await ensureValidWorkspaceContext(agentName);
+      if (!context) return;
+      const { workspaceId } = context;
+      ab ? ab.cancelAgent(agentName, workspaceId) : agent.cancel();
       await message.reply(`⏹ ${agentName} を停止しました。`);
       return;
     }
 
     // "hanako new?" / "hanako reset?" — reset session
     if (verb === "new" || verb === "reset") {
-      ab ? ab.resetAgentSession(agentName) : agent.resetSession();
+      const context = await ensureValidWorkspaceContext(agentName);
+      if (!context) return;
+      const { workspaceId } = context;
+      ab ? ab.resetAgentSession(agentName, workspaceId) : agent.resetSession();
       await message.reply(`🆕 ${agentName} のセッションをリセットしました。`);
       return;
     }
 
     // "hanako?" (no prompt) — show status
     if (!prompt) {
+      if (ab) {
+        const context = await ensureValidWorkspaceContext(agentName);
+        if (!context) return;
+        const { workspaceId } = context;
+        const workspace = ab.getWorkspace?.(workspaceId);
+        const terminalState = ab.getAgentTerminalState(agentName, workspaceId);
+        const workspaceLabel = workspace?.name ? `${workspace.name} (${workspaceId})` : workspaceId;
+        await message.reply(`ℹ️ ${agentName} [${workspaceLabel}] status: ${terminalState.status}`);
+        return;
+      }
       await message.reply(agent.getStatusLine());
       return;
     }
 
     // "hanako? <prompt>" — run prompt via AgentBridge (with CanonicalEvents)
     // Resolve workspace from Discord channel binding
-    const channelId = message.channelId;
-    let workspaceId = "default";
-    if (ab) {
-      const binding = ab.getDiscordBinding(channelId);
-      if (binding?.workspaceId) workspaceId = binding.workspaceId;
-    }
+    const context = await ensureValidWorkspaceContext(agentName);
+    if (!context) return;
+    const { workspaceId } = context;
 
-    const statusMsg = await message.reply(`> 🤔 ${agentName} thinking…`).catch(() => null);
-    const startedAt = Date.now();
-
-    // Track last tool name for live progress edits
-    let lastProgressEdit = Date.now();
-
-    const onProgress = statusMsg
-      ? async (event) => {
-          if (event.type === "tool.start") {
-            const now = Date.now();
-            // Throttle edits to max once per 2s to avoid rate limits
-            if (now - lastProgressEdit < 2000) return;
-            lastProgressEdit = now;
-            await statusMsg
-              .edit(`> 🔧 ${agentName}: \`${event.toolName}\` 実行中…`)
-              .catch(() => null);
-          }
-        }
-      : null;
-
-    try {
-      const workdir = this.config.codexWorkdir;
-
-      // Use AgentBridge if available, fall back to direct agent.run()
-      let result;
-      if (ab) {
-        result = await ab.runPrompt({
-          agentName,
-          prompt,
-          workspaceId,
-          workdir,
-          source: "discord",
-          discordMessageId: message.id,
-          onProgress,
-        });
-      } else {
-        const raw = await agent.run({ prompt, workdir });
-        result = { text: raw.text, usage: raw.usage };
-      }
-
-      const elapsed = Math.round((Date.now() - startedAt) / 1000);
-
-      const { formatUsage } = await import("./pricing.js");
-      const usageLine = formatUsage(agent.model || agent.adapter?.defaultModel || "", result.usage);
-
-      const parts = [];
-      if (result.text) parts.push(result.text);
-      parts.push(`\n> ✅ ${agentName} 完了 (${elapsed}s)${usageLine ? `\n> 📊 ${usageLine}` : ""}`);
-
-      const replyText = parts.join("\n");
-      const chunks = splitMessage(replyText, 1900);
-      if (statusMsg) await statusMsg.delete().catch(() => null);
-      for (const chunk of chunks) {
-        await message.channel.send(chunk).catch(() => null);
-      }
-    } catch (err) {
-      if (err.cancelled) {
-        if (statusMsg) await statusMsg.edit(`> ⏹ ${agentName} キャンセルされました。`).catch(() => null);
-        return;
-      }
-      const errText = `> ❌ ${agentName} エラー: ${err.message}`;
-      if (statusMsg) await statusMsg.edit(errText).catch(() => null);
-      else await message.reply(errText).catch(() => null);
-    }
+    await this.runDiscordAgentPrompt({ message, agentName, workspaceId, prompt, rawAttachments });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1389,13 +1852,24 @@ export class DiscordAdapter {
       const agentNames = this.agentRegistry.names();
       const cmd = parseAgentCommand(content, agentNames);
       if (cmd) {
-        await this.handleAgentCommand(message, cmd);
+        await this.handleAgentCommand(message, cmd, rawAttachments);
         return;
       }
     }
     // ─────────────────────────────────────────────────────────────────────
 
     if (content === "!status") {
+      if (this.agentBridge && this.agentRegistry?.hasAgents()) {
+        const context = this.resolveDiscordWorkspaceContext(message.channelId);
+        if (!context.binding || context.invalidBinding || !context.workspaceId) {
+          await this.replyWorkspaceBindingRequired(message, context);
+          return;
+        }
+        const workspace = this.agentBridge.getWorkspace?.(context.workspaceId) ?? null;
+        await message.reply(formatWorkspaceStatusMessage(workspace, context.agentName));
+        return;
+      }
+
       const session = this.getLinkedSession(message.channelId);
       if (!session) {
         await message.reply("No session is linked to this channel yet.");
@@ -1406,19 +1880,17 @@ export class DiscordAdapter {
       return;
     }
 
-    if (content === "!new") {
-      const currentSession = this.getLinkedSession(message.channelId);
-      const session = this.bridge.createSession({
-        title: `Discord ${message.channel.name || message.channelId}`,
-        discordChannelId: message.channelId,
-        discordChannelName: getChannelDisplayName(message.channel) || "unknown",
-        model: currentSession?.model,
-        reasoningEffort: currentSession?.reasoningEffort,
-        profile: currentSession?.profile,
-        serviceTier: currentSession?.serviceTier,
-      });
+    if (content === "!help") {
+      await message.reply(formatDiscordHelpText());
+      return;
+    }
 
-      await message.reply(`Created and linked session \`${session.id}\`.`);
+    if (content === "!new") {
+      await this.createOrBindWorkspaceFromChannel({
+        channelId: message.channelId,
+        channelName: getChannelDisplayName(message.channel) || message.channelId,
+        reply: (content) => message.reply(content),
+      });
       return;
     }
 
@@ -1438,15 +1910,26 @@ export class DiscordAdapter {
       return;
     }
 
+    if (this.agentBridge && this.agentRegistry?.hasAgents()) {
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId || !context.agentName) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      await this.runDiscordAgentPrompt({
+        message,
+        agentName: context.agentName,
+        workspaceId: context.workspaceId,
+        prompt: message.content,
+        rawAttachments,
+      });
+      return;
+    }
+
     let session = this.getLinkedSession(message.channelId);
     if (!session) {
-      session = this.bridge.createSession({
-        title: message.content.slice(0, 48) || rawAttachments[0]?.name || "Discord attachment",
-        discordChannelId: message.channelId,
-        discordChannelName: getChannelDisplayName(message.channel) || "unknown",
-      });
-
-      await message.reply(`Started a new session: \`${session.id}\``);
+      await this.replyWorkspaceBindingRequired(message, this.resolveDiscordWorkspaceContext(message.channelId));
+      return;
     }
 
     try {
@@ -1590,3 +2073,9 @@ export class DiscordAdapter {
     this.markProgressTrackerHasTrailingMessages(session.id);
   }
 }
+
+export const __testHooks = {
+  formatWorkingStatusContent,
+  getUnsyncedSuffix,
+  formatDiscordHelpText,
+};

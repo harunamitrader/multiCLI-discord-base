@@ -19,16 +19,16 @@ set "HEALTH_URL=%BASE_URL%/api/health"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "try { $r = Invoke-WebRequest -Uri '%HEALTH_URL%' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }"
 if errorlevel 1 (
-  start "CoDiCoDi Server" cmd.exe /k "cd /d ""%PROJECT_ROOT%"" && call scripts\start-server.cmd"
+  start "multiCLI-discord-base Server" cmd.exe /k "cd /d ""%PROJECT_ROOT%"" && call scripts\start-server.cmd"
 
   powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ready = $false; for ($i = 0; $i -lt 60; $i++) { try { $r = Invoke-WebRequest -Uri '%HEALTH_URL%' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { $ready = $true; break } } catch {}; Start-Sleep -Seconds 1 }; if (-not $ready) { exit 1 }"
   if errorlevel 1 (
-    echo CoDiCoDi server did not become ready: %HEALTH_URL%
+    echo multiCLI-discord-base server did not become ready: %HEALTH_URL%
     pause
     exit /b 1
   )
 )
 
-start "" "%BASE_URL%"
+start "" "%BASE_URL%/multiCLI-discord-base.html"
 exit /b 0

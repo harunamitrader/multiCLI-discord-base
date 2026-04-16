@@ -1,13 +1,14 @@
 node_modules/
 data/
 .env
+config/*.json
+!config/*.example.json
 *.log
 server-start.err.log
 server-start.out.log
-src-tauri/target/
-.tauri/
 .vscode/
 .idea/
 dist/
 coverage/
 tmp-*.png
+.ai/

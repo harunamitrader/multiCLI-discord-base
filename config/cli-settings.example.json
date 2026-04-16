@@ -1,0 +1,21 @@
+{
+  "commands": {
+    "claude": "claude",
+    "gemini": "gemini",
+    "copilot": "copilot",
+    "codex": "codex"
+  },
+  "codex": {
+    "workdir": "C:\\Users\\your-name\\Desktop\\AI",
+    "enableSearch": true,
+    "approvalPolicy": null,
+    "sandboxMode": null,
+    "bypassApprovalsAndSandbox": true,
+    "defaults": {
+      "model": "",
+      "reasoningEffort": "",
+      "serviceTier": "flex",
+      "profile": "default"
+    }
+  }
+}

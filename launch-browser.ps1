@@ -33,8 +33,10 @@ if (Test-Path $envPath) {
 
 $baseUrl = "http://{0}:{1}" -f $hostName, $port
 $healthUrl = "$baseUrl/api/health"
+$launcherNonce = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+$uiUrl = "$baseUrl/multiCLI-discord-base.html?v=$launcherNonce&launcher=launch-browser"
 
-function Test-CoDiCoDiHealth {
+function Test-MultiCliDiscordBaseHealth {
   param([string]$Url)
 
   try {
@@ -45,7 +47,7 @@ function Test-CoDiCoDiHealth {
   }
 }
 
-if (-not (Test-CoDiCoDiHealth -Url $healthUrl)) {
+if (-not (Test-MultiCliDiscordBaseHealth -Url $healthUrl)) {
   Start-Process `
     -FilePath "cmd.exe" `
     -ArgumentList @(
@@ -57,15 +59,15 @@ if (-not (Test-CoDiCoDiHealth -Url $healthUrl)) {
   $started = $false
   for ($attempt = 0; $attempt -lt 60; $attempt++) {
     Start-Sleep -Seconds 1
-    if (Test-CoDiCoDiHealth -Url $healthUrl) {
+    if (Test-MultiCliDiscordBaseHealth -Url $healthUrl) {
       $started = $true
       break
     }
   }
 
   if (-not $started) {
-    throw "CoDiCoDi server did not become ready: $healthUrl"
+    throw "multiCLI-discord-base server did not become ready: $healthUrl"
   }
 }
 
-Start-Process $baseUrl
+Start-Process $uiUrl

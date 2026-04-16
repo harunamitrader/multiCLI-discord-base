@@ -32,8 +32,9 @@ async function main() {
 
   const agentRegistry = new AgentRegistry(config);
   // PtyService must be created before AgentBridge so it can be injected
-  ptyService = new PtyService({ agentRegistry, config, bus });
-  const agentBridge = new AgentBridge({ agentRegistry, store, bus, config, ptyService });
+  ptyService = new PtyService({ agentRegistry, config, bus, store });
+  scheduler = new SchedulerService({ config, bus });
+  const agentBridge = new AgentBridge({ agentRegistry, store, bus, config, ptyService, scheduler });
   const attachments = new AttachmentService(config);
   const bridge = new BridgeService({ store, bus, codex, config, attachments });
   const shutdown = async () => {
@@ -63,9 +64,9 @@ async function main() {
 
     restartPromise = (async () => {
       restartRequested = true;
-      process.env.CODICODI_LAST_RESTART_REQUESTED_BY = requestedBy;
-      process.env.CODICODI_LAST_RESTART_SOURCE = source;
-      process.env.CODICODI_LAST_RESTARTED_AT = new Date().toISOString();
+      process.env.MULTICLI_DISCORD_BASE_LAST_RESTART_REQUESTED_BY = requestedBy;
+      process.env.MULTICLI_DISCORD_BASE_LAST_RESTART_SOURCE = source;
+      process.env.MULTICLI_DISCORD_BASE_LAST_RESTARTED_AT = new Date().toISOString();
 
       await shutdown();
       process.exit(RESTART_EXIT_CODE);
@@ -75,7 +76,6 @@ async function main() {
   };
   discord = new DiscordAdapter({ bridge, agentBridge, bus, config, attachments, restartServer, agentRegistry });
   fileWatcher = new FileWatcherService({ config, discord });
-  scheduler = new SchedulerService({ config, bus });
   server = createHttpServer({
     config,
     bridge,
@@ -105,22 +105,44 @@ async function main() {
   }
 
   try {
-    await scheduler.init(async (job) =>
-      bridge.triggerScheduledJob({
+    await scheduler.init(async (job) => {
+      if (String(job.target?.type || "").trim().toLowerCase() === "agent") {
+        return agentBridge.runScheduledJob({
+          name: job.name,
+          prompt: job.prompt,
+          target: job.target,
+          workdir: bridge.getScheduleDefaults().workdir,
+        });
+      }
+
+      return bridge.triggerScheduledJob({
         name: job.name,
         prompt: job.prompt,
         target: job.target,
-      }),
-    );
+      });
+    });
   } catch (error) {
     console.error("Scheduler failed to start.");
     console.error(error);
   }
 
+  const bootstrapResumeState = () => {
+    try {
+      const result = ptyService?.backfillStoredSessionRefs?.() ?? null;
+      if (!result) return;
+      console.log(
+        `[pty] session backfill scanned ${result.candidateCount} workspace-agent pairs, updated ${result.updatedCount}`,
+      );
+    } catch (error) {
+      console.warn("[pty] session backfill failed:", error?.message || error);
+    }
+  };
+
   server.listen(config.port, config.host, () => {
     console.log(
       `Bridge server running at http://${config.host}:${config.port} with base workdir ${config.codexWorkdir}`,
     );
+    queueMicrotask(bootstrapResumeState);
   });
 
   process.on("SIGINT", async () => {
