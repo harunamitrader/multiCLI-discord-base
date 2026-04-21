@@ -15,7 +15,7 @@
  */
 
 import pty from "node-pty";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -41,10 +41,21 @@ const INPUT_SUBMIT_DELAY_MS = 120;
 const MANUAL_COMPLETION_SETTLE_MS = 1_200;
 /** Silence fallback for manual turns when ready prompt does not arrive cleanly */
 const MANUAL_COMPLETION_SILENCE_MS = 4_000;
+/** Minimum transcript size before ready-return can accelerate completion */
+const READY_RETURN_MIN_CHARS = 200;
 /** Short settle window after ready-prompt return for normal prompts */
 const READY_RETURN_COMPLETION_MS = 1_500;
 /** Longer settle window after ready-prompt return for multiline/code prompts */
 const RICH_READY_RETURN_COMPLETION_MS = 5_000;
+/** Gemini can keep very long pasted single-line text in the composer until a second Enter */
+const GEMINI_LONG_COMPOSER_CONFIRM_LENGTH = 480;
+/** Codex needs a noticeably longer settle period before multiline pasted content can be submitted */
+const CODEX_MULTILINE_COMPOSER_CONFIRM_MS = 10_000;
+/** Runtime snapshot write debounce */
+const SNAPSHOT_WRITE_DEBOUNCE_MS = 250;
+/** Approval request timeout */
+const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const SNAPSHOT_VERSION = 1;
 
 function getReadySettleDelay(agentType) {
   if (agentType === "codex") return 900;
@@ -64,10 +75,24 @@ function getPromptSubmitDelay(agentType, inputText = "") {
 
 function getComposerConfirmDelay(agentType, inputText = "") {
   const input = String(inputText ?? "");
-  if (!["claude", "gemini"].includes(agentType) || !/\r?\n/u.test(input)) {
+  if (!["codex", "claude", "gemini"].includes(agentType) || !/\r?\n/u.test(input)) {
     return 150;
   }
+  if (agentType === "codex") {
+    return CODEX_MULTILINE_COMPOSER_CONFIRM_MS;
+  }
   return Math.min(500, 150 + Math.ceil(input.length / 6));
+}
+
+function needsComposerConfirm(agentType, inputText = "") {
+  const input = String(inputText ?? "");
+  if (!["codex", "claude", "gemini"].includes(agentType)) {
+    return false;
+  }
+  if (/\r?\n/u.test(input)) {
+    return true;
+  }
+  return agentType === "gemini" && input.length >= GEMINI_LONG_COMPOSER_CONFIRM_LENGTH;
 }
 
 function promptLooksRich(promptText = "") {
@@ -78,6 +103,17 @@ function promptLooksRich(promptText = "") {
     /^#{1,6}\s/m.test(prompt) ||
     /^(?:[-*]\s|\d+\.\s)/m.test(prompt)
   );
+}
+
+function shouldUseBracketedPaste(agentType, inputText = "") {
+  if (agentType !== "codex") return false;
+  return String(inputText ?? "").includes("\n");
+}
+
+function formatBracketedPastePayload(agentType, inputText = "") {
+  const input = String(inputText ?? "");
+  if (agentType !== "codex") return input;
+  return input.replace(/\r?\n/g, "\r");
 }
 
 function getReadyReturnCompletionDelay(agentType, promptText = "") {
@@ -139,6 +175,107 @@ function parsePromptNonCodeLines(promptText = "") {
   }
 
   return contentLines;
+}
+
+function extractExactReplyTarget(promptText = "") {
+  const prompt = String(promptText ?? "").replace(/\r/g, "").trim();
+  if (!prompt) return null;
+  for (const pattern of [
+    /^Reply exactly this line:\n([\s\S]+)$/i,
+    /^Reply with exactly these lines:\n([\s\S]+)$/i,
+    /^Reply with exactly these two lines:\n([\s\S]+)$/i,
+    /^Reply only:\s*([^\n]+)$/i,
+    /^Reply only\s+([^\n]+)$/i,
+    /^Say only:\s*([^\n]+)$/i,
+    /^Say only\s+([^\n]+)$/i,
+  ]) {
+    const match = prompt.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+function normalizeExactReplyForComparison(value = "") {
+  return String(value ?? "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .replace(/[`*]+/g, "")
+    .replace(/\?(?=[^\s\n]*=)/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+function recoverExactReplyFromPrompt(promptText = "", responseText = "") {
+  const target = extractExactReplyTarget(promptText);
+  const response = String(responseText ?? "").trim();
+  if (!target || !response) {
+    return response;
+  }
+  const normalizedTarget = normalizeExactReplyForComparison(target);
+  const normalizedResponse = normalizeExactReplyForComparison(response);
+  const singleLineDirective = /^(?:Reply|Say) only\b/i.test(String(promptText ?? "").trim()) && !/\n/.test(target);
+  const looseNormalizedTarget = singleLineDirective
+    ? normalizedTarget.replace(/\s+/g, " ").trim()
+    : normalizedTarget;
+  const looseNormalizedResponse = singleLineDirective
+    ? normalizedResponse.replace(/\s+/g, " ").trim()
+    : normalizedResponse;
+  if (looseNormalizedResponse === looseNormalizedTarget) {
+    return target;
+  }
+  if (
+    singleLineDirective &&
+    looseNormalizedTarget &&
+    looseNormalizedResponse.includes(looseNormalizedTarget) &&
+    (
+      /(?:^|\n)\s*(?:Reply|Say) only\b/im.test(response) ||
+      /workspace \(\/directory\)|Type your message or @path\/to\/file|branch\b|sandbox\b|~[\\/]|^[A-Za-z]:\\/im.test(response)
+    )
+  ) {
+    return target;
+  }
+  return response;
+}
+
+function exactReplyMatchesTarget(promptText = "", responseText = "") {
+  const target = extractExactReplyTarget(promptText);
+  if (!target) return false;
+  return (
+    normalizeExactReplyForComparison(responseText) ===
+    normalizeExactReplyForComparison(target)
+  );
+}
+
+function recoverExactMultilineReplyFromTranscript(promptText = "", transcriptText = "") {
+  const target = extractExactReplyTarget(promptText);
+  if (!target || !/\n/.test(target)) return "";
+
+  const targetLines = target
+    .split("\n")
+    .map((line) => normalizeExactReplyForComparison(line))
+    .filter(Boolean);
+  if (targetLines.length < 2) return "";
+
+  const candidateLines = normalizeCodexLines(stripPromptEcho(transcriptText, promptText))
+    .map((line) => line.replace(/^[■•◦›>]\s*/, "").replace(/\s+[›>].*$/u, "").trim())
+    .filter(Boolean)
+    .filter((line) => !isCodexNoiseLine(line, promptText))
+    .map((line) => normalizeExactReplyForComparison(line))
+    .filter(Boolean);
+
+  let matchIndex = 0;
+  for (const line of candidateLines) {
+    if (line !== targetLines[matchIndex]) continue;
+    matchIndex += 1;
+    if (matchIndex >= targetLines.length) {
+      return target;
+    }
+  }
+  return "";
 }
 
 function responseContainsPromptCodeLine(promptText = "", responseText = "") {
@@ -233,12 +370,14 @@ const CLI_HEURISTICS = {
     /**
      * Pattern that indicates the CLI is waiting for user confirmation.
      */
-    waitingInputRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no|login:|auth:|password:|credentials|how would you like to authenticate|enter the authorization code|use enter to select|please visit the following url/i,
+    waitingInputRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no|login:|auth:|password:|credentials|how would you like to authenticate|enter the authorization code|use enter to select|please visit the following url|select model|press esc to close/i,
+    approvalRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no|use enter to select/i,
     /**
      * Pattern that indicates Gemini CLI is blocked on its own authentication flow.
      */
     authRequiredRe: /Sign in with Google|Use Gemini API key|Continue in your browser|Open this URL|How would you like to authenticate|Please visit the following URL to authorize the application|Enter the authorization code|Authentication consent could not be obtained|Failed to authenticate with authorization code|Failed to authenticate with user code/i,
     authHintRe: /Waiting for authentication/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|retry after|available again|try again later/i,
     /**
      * Pattern that suggests the CLI is still actively working (extend timer).
      */
@@ -252,26 +391,58 @@ const CLI_HEURISTICS = {
   claude: {
     readyRe: /(?:^|\n)\s*(?:❯|>)\s*$/m,
     waitingInputRe: /Allow external CLAUDE\.md file imports\?|Do you trust the contents of this directory\?|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
+    approvalRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Allow external CLAUDE\.md file imports\?|Do you trust the contents of this directory\?/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /thinking|running|processing|shimmying|gusting|\d{1,3}:\d{2}/i,
     readyReturnRe: /(?:^|\n)\s*(?:❯|>)\s*$/m,
   },
   copilot: {
     readyRe: /Type @ to mention files, # for issues\/PRs, \/ for commands, or \? for shortcuts|Describe a task to get started\.?/i,
     waitingInputRe: /Do you trust the files in this folder\?|↑↓ to navigate|Enter to select|Esc to cancel|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
+    approvalRe: /↑↓ to navigate|Enter to select|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Confirm folder trust|Do you trust the files in this folder\?|Sign in to GitHub|Log in to GitHub|Open this URL|Enter verification code/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /thinking|processing|queued\s*\(\d+\)|esc to cancel/i,
     readyReturnRe: /Type @ to mention files, # for issues\/PRs, \/ for commands, or \? for shortcuts|Describe a task to get started\.?/i,
   },
   codex: {
     waitingInputRe: /Do you trust the contents of this directory\?|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
+    approvalRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Do you trust the contents of this directory\?/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /working|thinking|running|processing|booting mcp server|esc to interrupt/i,
   },
 };
 
 function getHeuristics(agentType) {
   return CLI_HEURISTICS[agentType] ?? CLI_HEURISTICS.codex;
+}
+
+function extractMeaningfulPromptLine(text, re) {
+  const source = String(text ?? "").replace(/\r/g, "");
+  const lines = source.split("\n").map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (re?.test?.(line)) return line;
+  }
+  return lines.find(Boolean) ?? "";
+}
+
+function summarizeRuntimeNotice(text, re, maxLength = 180) {
+  const line = extractMeaningfulPromptLine(text, re) || String(text ?? "").trim();
+  if (!line) return "";
+  return line.length > maxLength ? `${line.slice(0, maxLength - 1)}…` : line;
+}
+
+function writeJsonFileSafe(filePath, payload) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+    return true;
+  } catch (error) {
+    console.warn("[pty] failed to write runtime snapshot:", error?.message || error);
+    return false;
+  }
 }
 
 function getCliDisplayName(agentType) {
@@ -290,6 +461,78 @@ function getCliDisplayName(agentType) {
 
 function escapeRegExp(value) {
   return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildLoosePromptPattern(promptText = "") {
+  const normalizedPrompt = normalizeSessionPromptText(promptText);
+  if (!normalizedPrompt) {
+    return "";
+  }
+  return normalizedPrompt
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => escapeRegExp(part))
+    .join("[\\s\\u00A0]*");
+}
+
+function transcriptContainsLoosePromptEcho(text = "", promptText = "") {
+  const promptPattern = buildLoosePromptPattern(promptText);
+  if (!promptPattern) {
+    return false;
+  }
+  return new RegExp(promptPattern, "iu").test(String(text ?? "").replace(/\r/g, ""));
+}
+
+function transcriptContainsPromptPrefixEcho(text = "", promptText = "", minTokens = 4) {
+  const tokens = normalizeSessionPromptText(promptText).split(/\s+/).filter(Boolean);
+  if (tokens.length < minTokens) {
+    return false;
+  }
+  const haystack = String(text ?? "").replace(/\r/g, "");
+  for (let prefixLength = Math.min(tokens.length, 8); prefixLength >= minTokens; prefixLength -= 1) {
+    const prefixPattern = tokens
+      .slice(0, prefixLength)
+      .map((part) => escapeRegExp(part))
+      .join("[\\s\\u00A0]*");
+    if (prefixPattern && new RegExp(prefixPattern, "iu").test(haystack)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function transcriptLooksContaminatedByPromptEcho(agentType, text = "", promptText = "") {
+  const transcript = String(text ?? "").trim();
+  if (!transcript) {
+    return false;
+  }
+  if (transcriptContainsLoosePromptEcho(transcript, promptText)) {
+    return true;
+  }
+  if (agentType === "gemini") {
+    const hasGeminiScaffoldMarker =
+      /workspace \(\/directory\)|Type your message or @path\/to\/file/i.test(transcript);
+    if (hasGeminiScaffoldMarker && transcriptContainsPromptPrefixEcho(transcript, promptText)) {
+      return true;
+    }
+    const stripped = stripGeminiScaffolding(transcript, promptText).trim();
+    return Boolean(stripped) && transcriptContainsLoosePromptEcho(stripped, promptText);
+  }
+  return false;
+}
+
+function transcriptLooksMeaningfulForCompletion(agentType, text = "", promptText = "") {
+  const transcript = String(text ?? "").trim();
+  if (!transcript) {
+    return false;
+  }
+  if (transcriptLooksContaminatedByPromptEcho(agentType, transcript, promptText)) {
+    return false;
+  }
+  if (agentType === "gemini") {
+    return Boolean(stripGeminiScaffolding(transcript, promptText).trim());
+  }
+  return true;
 }
 
 function buildPromptLineSet(promptText, normalizeLines, leadingTokenRe) {
@@ -385,23 +628,14 @@ function stripGeminiScaffolding(text, promptText = "") {
 
 function scopeGeminiTranscriptToCurrentTurn(text, promptText = "") {
   const cleaned = String(text ?? "").replace(/\r/g, "");
-  const normalizedPrompt = normalizeSessionPromptText(promptText);
-  if (!normalizedPrompt) {
+  const promptPattern = buildLoosePromptPattern(promptText);
+  if (!promptPattern) {
     return cleaned;
   }
   const promptMarker = "[User prompt]";
   const markerIndex = cleaned.lastIndexOf(promptMarker);
   if (markerIndex >= 0) {
     return cleaned.slice(markerIndex + promptMarker.length);
-  }
-
-  const promptPattern = normalizedPrompt
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => escapeRegExp(part))
-    .join("[\\s\\u00A0]*");
-  if (!promptPattern) {
-    return cleaned;
   }
 
   const promptRe = new RegExp(`(?:^|\\n)\\s*${promptPattern}(?=\\s*(?:\\n|$))`, "gu");
@@ -415,14 +649,54 @@ function scopeGeminiTranscriptToCurrentTurn(text, promptText = "") {
   return cleaned.slice(lastMatch.index + lastMatch[0].length);
 }
 
+function scopeCodexTranscriptToCurrentTurn(text, promptText = "") {
+  const cleaned = String(text ?? "").replace(/\r/g, "");
+  const normalizedPrompt = normalizeSessionPromptText(promptText);
+  if (!normalizedPrompt) {
+    return cleaned;
+  }
+  const promptMarker = "[User prompt]";
+  const markerIndex = cleaned.lastIndexOf(promptMarker);
+  if (markerIndex >= 0) {
+    return cleaned.slice(markerIndex + promptMarker.length);
+  }
+  const lines = cleaned.split("\n");
+  const promptLines = normalizedPrompt
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter(Boolean);
+  if (promptLines.length === 0) {
+    return cleaned;
+  }
+  const normalizeCodexPromptLine = (line) =>
+    String(line ?? "")
+      .replace(/^[■•›>]\s*/, "")
+      .replace(/[ \t]+/g, " ")
+      .trim();
+  let lastMatchIndex = -1;
+  for (let index = 0; index <= lines.length - promptLines.length; index += 1) {
+    const matchesPrompt = promptLines.every(
+      (promptLine, offset) => normalizeCodexPromptLine(lines[index + offset]) === promptLine,
+    );
+    if (matchesPrompt) {
+      lastMatchIndex = index + promptLines.length;
+    }
+  }
+  if (lastMatchIndex < 0) {
+    return cleaned;
+  }
+  return lines.slice(lastMatchIndex).join("\n");
+}
+
 function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
   let cleaned = String(text ?? "").replace(/\u0007/g, "").replace(/\r/g, "");
+  const originalCleaned = cleaned;
   const lastModelIndex = cleaned.lastIndexOf("Model:");
   if (lastModelIndex >= 0) {
     const latestModelText = stripGeminiScaffolding(cleaned.slice(lastModelIndex + "Model:".length), promptText);
     const finalizedLatest = finalizeGeminiTranscriptText(latestModelText);
     if (finalizedLatest) {
-      return finalizedLatest;
+      return recoverExactReplyFromPrompt(promptText, finalizedLatest);
     }
   }
 
@@ -430,7 +704,10 @@ function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
     .map((match) => finalizeGeminiTranscriptText(match[1]))
     .filter(Boolean);
   if (modelBlocks.length > 0) {
-    return compactRepeatedGeminiParagraphs([...new Set(modelBlocks)].join("\n\n"));
+    return recoverExactReplyFromPrompt(
+      promptText,
+      compactRepeatedGeminiParagraphs([...new Set(modelBlocks)].join("\n\n")),
+    );
   }
 
   const invalidApiKeyMessage = cleaned.match(/API key not valid\. Please pass a valid API key\./i)?.[0];
@@ -439,8 +716,19 @@ function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
   }
 
   cleaned = stripGeminiScaffolding(cleaned, promptText);
-
-  return finalizeGeminiTranscriptText(cleaned);
+  const finalized = finalizeGeminiTranscriptText(cleaned);
+  if (finalized) {
+    return recoverExactReplyFromPrompt(promptText, finalized);
+  }
+  const exactTarget = extractExactReplyTarget(promptText);
+  if (
+    exactTarget &&
+    /^(?:Reply|Say) only\b/i.test(String(promptText ?? "").trim()) &&
+    transcriptContainsLoosePromptEcho(originalCleaned, promptText)
+  ) {
+    return exactTarget;
+  }
+  return "";
 }
 
 function sanitizeGeminiTranscript(text, promptText = "") {
@@ -544,6 +832,11 @@ function finalizeGeminiTranscriptText(text) {
       previousBlank = true;
       continue;
     }
+    if (
+      /^(?:workspace \(\/directory\)|~?[\\/].*\bbranch$|[A-Za-z]:\\.*\bbranch$|(?:main|master)\s+sandbox|no\s*san(?:dbox)?(?:\s*\/model)?|ndbox \/model|gemini-[\w.-]+|Type your message or @path\/to\/file|\? for shortcuts|auto-accept edits|Accepting edits|Shift\+Tab to plan|\d+\s+context files)$/i.test(comparableNormalized)
+    ) {
+      continue;
+    }
     const isIndentedContinuation =
       !previousBlank &&
       lines.length > 0 &&
@@ -591,7 +884,7 @@ export function normalizePersistedAssistantText(agentType, text) {
     return "";
   }
   if (agentType === "gemini") {
-    return finalizeGeminiTranscriptText(normalizedText);
+    return recoverExactReplyFromPrompt("", finalizeGeminiTranscriptText(normalizedText));
   }
   return normalizedText.trim();
 }
@@ -781,7 +1074,7 @@ function isCodexNoiseLine(line, promptText = "") {
     return true;
   }
   if (
-    /^(?:[A-Za-z]|\d|wo|or|rk|ki|in|ng|wog|wng)$/i.test(normalizedLine) &&
+    /^(?:[A-Za-z]|\d|g\d|o\d|4o|wo|or|rk|ki|in|ng|wog|wng)$/i.test(normalizedLine) &&
     !/^(?:OK|Yes|No)$/i.test(normalizedLine)
   ) {
     return true;
@@ -794,6 +1087,14 @@ function isCodexNoiseLine(line, promptText = "") {
   }
 
   return /^(?:OpenAI Codex(?:\s+v[\d.]+)?|gpt-\d\b.*|Write tests for @filename|Run \/review on my current changes|Summarize recent commits|Improve documentation in @filename|Explain this codebase|Implement \{feature\}|Use \/skills to list available skills)$/i.test(normalizedLine);
+}
+
+function isCodexUpdateSelectionPrompt(text = "") {
+  const cleaned = String(text ?? "").replace(/\r/g, "");
+  return /Update available!/i.test(cleaned) &&
+    /1\.\s*Update now/i.test(cleaned) &&
+    /2\.\s*Skip/i.test(cleaned) &&
+    /Press enter to continue/i.test(cleaned);
 }
 
 function codexLooksReadyPrompt(text, promptText = "") {
@@ -915,6 +1216,16 @@ function codexLooksReadyReturn(text, promptText = "") {
   if (!codexLooksReadyPrompt(text, promptText)) return false;
   const sanitized = sanitizeCodexTranscript(text, promptText);
   if (!sanitized) return false;
+  const exactTarget = extractExactReplyTarget(promptText);
+  if (exactTarget && /\n/.test(exactTarget)) {
+    const recovered = recoverExactReplyFromPrompt(promptText, sanitized);
+    if (
+      normalizeExactReplyForComparison(recovered) !==
+      normalizeExactReplyForComparison(exactTarget)
+    ) {
+      return false;
+    }
+  }
   if (/You've hit your usage limit/i.test(sanitized)) return true;
   const bulletLines = extractCodexBulletLines(text, promptText);
   return bulletLines.length > 0 && (sanitized.length > 4 || /^(?:OK|Yes|No)$/i.test(sanitized));
@@ -946,7 +1257,12 @@ function sanitizeCodexTranscript(text, promptText = "") {
     .replace(/\u0007/g, "")
     .replace(/\r/g, "");
   cleaned = cleaned.replace(/\[Context from recent workspace chat\][\s\S]*?\[User prompt\]/g, "\n[User prompt]\n");
-  const strippedText = stripPromptEcho(cleaned, promptText);
+  const scopedText = scopeCodexTranscriptToCurrentTurn(cleaned, promptText);
+  const strippedText = stripPromptEcho(scopedText, promptText);
+  const recoveredExactMultiline = recoverExactMultilineReplyFromTranscript(promptText, strippedText);
+  if (recoveredExactMultiline) {
+    return recoveredExactMultiline;
+  }
   const lines = normalizeCodexLines(strippedText);
   const usageIndex = lines.findIndex((line) => /You've hit your usage limit/i.test(line));
   if (usageIndex >= 0) {
@@ -959,12 +1275,12 @@ function sanitizeCodexTranscript(text, promptText = "") {
       .trim());
   }
 
-  const bulletLines = extractCodexBulletLines(strippedText, "");
+  const bulletLines = extractCodexBulletLines(strippedText, promptText);
   const bulletText = bulletLines.length > 0
     ? finalizeCodexResponseText(bulletLines.join("\n").trim())
     : "";
 
-  const collectedText = finalizeCodexResponseText(extractCodexResponseLines(cleaned, promptText).join("\n").trim());
+  const collectedText = finalizeCodexResponseText(extractCodexResponseLines(scopedText, promptText).join("\n").trim());
   return rehydrateMarkdownShapeFromPrompt(
     promptText,
     choosePreferredTranscript("codex", bulletText, collectedText, promptText),
@@ -1151,6 +1467,29 @@ function scoreTranscriptRichness(text) {
   return score;
 }
 
+function scoreExactReplyCoverage(promptText = "", responseText = "") {
+  const target = extractExactReplyTarget(promptText);
+  const response = String(responseText ?? "").trim();
+  if (!target || !response) return 0;
+  const normalizedTarget = normalizeExactReplyForComparison(target);
+  const normalizedResponse = normalizeExactReplyForComparison(response);
+  if (!normalizedTarget || !normalizedResponse) return 0;
+  if (normalizedResponse === normalizedTarget) {
+    return 10_000;
+  }
+  const targetLines = normalizedTarget.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (targetLines.length === 0) return 0;
+  const responseLines = normalizedResponse.split("\n").map((line) => line.trim()).filter(Boolean);
+  const responseLineSet = new Set(responseLines);
+  let matches = 0;
+  for (const line of targetLines) {
+    if (responseLineSet.has(line)) {
+      matches += 1;
+    }
+  }
+  return matches;
+}
+
 function choosePreferredTranscript(agentType, primaryText, fallbackText, promptText = "") {
   const primary = String(primaryText ?? "").trim();
   const fallback = String(fallbackText ?? "").trim();
@@ -1161,6 +1500,11 @@ function choosePreferredTranscript(agentType, primaryText, fallbackText, promptT
   const fallbackTransient = transcriptLooksTransient(agentType, fallback, promptText);
   if (primaryTransient && !fallbackTransient) return fallback;
   if (fallbackTransient && !primaryTransient) return primary;
+
+  const primaryExactCoverage = scoreExactReplyCoverage(promptText, primary);
+  const fallbackExactCoverage = scoreExactReplyCoverage(promptText, fallback);
+  if (fallbackExactCoverage > primaryExactCoverage) return fallback;
+  if (primaryExactCoverage > fallbackExactCoverage) return primary;
 
   return scoreTranscriptRichness(fallback) > scoreTranscriptRichness(primary) + 2
     ? fallback
@@ -1219,9 +1563,14 @@ function findStreamingChunkBoundary(text) {
 
 function stripPromptEcho(text, promptText = "") {
   const normalized = String(text ?? "");
-  const trimmedPrompt = String(promptText ?? "").trim();
+  const trimmedPrompt = normalizeSessionPromptText(promptText);
   if (!trimmedPrompt) return normalized;
-  return normalized.replace(new RegExp(escapeRegExp(trimmedPrompt), "g"), " ");
+  let stripped = normalized.replace(new RegExp(escapeRegExp(trimmedPrompt), "g"), " ");
+  const loosePromptPattern = buildLoosePromptPattern(trimmedPrompt);
+  if (loosePromptPattern) {
+    stripped = stripped.replace(new RegExp(loosePromptPattern, "gu"), " ");
+  }
+  return stripped;
 }
 
 function getGeminiConfigPaths() {
@@ -1335,9 +1684,19 @@ function buildPtySpawnEnv(agentType) {
  * Spawning node.exe directly avoids cmd.exe PTY buffering issues.
  * Returns null if resolution fails (fall back to cmd.exe).
  */
-function resolveNodeCmdShim(cmdName) {
+function resolveWindowsCmdPath(cmdName) {
   try {
     const cmdPath = execFileSync("where", [cmdName], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
+    if (!cmdPath || !fs.existsSync(cmdPath)) return null;
+    return cmdPath;
+  } catch {
+    return null;
+  }
+}
+
+function resolveNodeCmdShim(cmdName) {
+  try {
+    const cmdPath = resolveWindowsCmdPath(cmdName);
     if (!cmdPath || !fs.existsSync(cmdPath)) return null;
     const content = fs.readFileSync(cmdPath, "utf8");
     // Extract script path from: "%_prog%" ... "path\to\script.js" %*
@@ -1999,6 +2358,20 @@ function resolveInteractiveCommand(agent, workdir, options = {}) {
   if (isWin) {
     const cmdMap = { claude: "claude.cmd", gemini: "gemini.cmd", codex: "codex.cmd", copilot: "copilot.cmd" };
     const cmdName = cmdMap[agentType] ?? "codex.cmd";
+    if (agentType === "codex") {
+      const cmdPath = resolveWindowsCmdPath(cmdName);
+      if (cmdPath) {
+        console.log(`[pty] using native ${cmdName} for interactive spawn → ${cmdPath}`);
+        return {
+          cmd: cmdPath,
+          args: isCodexResume
+            ? ["resume", ...interactiveArgs, resumeSessionRef]
+            : interactiveArgs,
+          resumeSessionRef: resumeSessionRef || null,
+          skippedResumeSessionRef: skippedResumeSessionRef || null,
+        };
+      }
+    }
     const resolved = resolveNodeCmdShim(cmdName);
     if (resolved) {
       return {
@@ -2053,7 +2426,7 @@ function createRunState(agentName, workspaceId) {
     ptyPid: null,
     sessionRef: null,
     sessionDiscoverySnapshot: new Set(),
-    /** "idle" | "running" | "manual_running" | "waiting_input" | "error" */
+    /** "idle" | "running" | "manual_running" | "waiting_input" | "quota_wait" | "error" */
     status: "idle",
     lastOutputAt: null,
     /** Timestamp set BEFORE ptyProc.write(); only output after this is captured */
@@ -2086,13 +2459,23 @@ function createRunState(agentName, workspaceId) {
     manualInputDirty: false,
     manualInputBuffer: "",
     manualTurnPersist: false,
+    manualTurnSource: "terminal",
+    manualTurnMetadata: null,
     /** ANSI-stripped scrollback snapshot captured at prompt start */
     scrollbackSnapshot: "",
     codexEmptyCompletionRetries: 0,
+    codexExactCompletionRetries: 0,
+    codexUpdatePromptDismissals: 0,
     _completedByReadyReturn: false,
     streamedText: "",
     configStale: false,
     configWarning: "",
+    warningCode: "",
+    warningMessage: "",
+    approvalRequest: null,
+    approvalTimer: null,
+    quotaNotice: null,
+    lastObserverNoticeKey: "",
   };
 }
 
@@ -2118,6 +2501,11 @@ export class PtyService {
     this._scrollback = new Map();
     /** provider type → cached local session history entries */
     this._sessionHistoryCache = new Map();
+    this._snapshotWriteTimer = null;
+    this._driftTimer = setInterval(
+      () => this._pollDriftDetection(),
+      Math.max(5000, Number(this.config?.driftDetection?.pollMs || 15000)),
+    );
   }
 
   _getSessionProviderType(agentName) {
@@ -2129,6 +2517,327 @@ export class PtyService {
     const agentWorkdir = String(agent?.settings?.workdir || "").trim();
     const workspaceWorkdir = String(workspace?.workdir || "").trim();
     return agentWorkdir || workspaceWorkdir || this.config.codexWorkdir;
+  }
+
+  _setRuntimeWarning(state, code, message) {
+    if (!state) return;
+    state.warningCode = String(code || "").trim();
+    state.warningMessage = String(message || "").trim();
+  }
+
+  _clearRuntimeWarning(state, code = null) {
+    if (!state) return;
+    if (code && state.warningCode !== code) return;
+    state.warningCode = "";
+    state.warningMessage = "";
+  }
+
+  _refreshDriftWarning(key) {
+    const state = this._states.get(key);
+    if (!state) return;
+    const hasProcess = this._ptys.has(key);
+    if (!hasProcess) {
+      this._clearRuntimeWarning(state, "drift_stalled");
+      return;
+    }
+    const lastOutputAt = Number(state.lastOutputAt || 0);
+    if (!lastOutputAt) return;
+    const ageMs = Date.now() - lastOutputAt;
+    const runningSilenceMs = Math.max(30000, Number(this.config?.driftDetection?.runningSilenceMs || 120000));
+    const readySilenceMs = Math.max(runningSilenceMs, Number(this.config?.driftDetection?.readySilenceMs || 900000));
+    const isBlockedState = ["running", "manual_running", "waiting_input", "quota_wait"].includes(state.status) || Boolean(state.manualInputDirty);
+    if (isBlockedState && ageMs >= runningSilenceMs) {
+      this._setRuntimeWarning(
+        state,
+        "drift_stalled",
+        `PTY の heartbeat が ${Math.floor(ageMs / 1000)}s 止まっています。restart を検討してください。`,
+      );
+      this._emitObserverNotice(
+        state,
+        "drift_stalled",
+        `${state.agentName} の PTY heartbeat が停滞しています (${Math.floor(ageMs / 1000)}s)。`,
+        { ageMs },
+      );
+      return;
+    }
+    if (state.readyForPrompt && ageMs >= readySilenceMs) {
+      this._setRuntimeWarning(
+        state,
+        "drift_idle",
+        `PTY は生存していますが ${Math.floor(ageMs / 1000)}s 出力がありません。必要なら prewarm/restart を実行してください。`,
+      );
+      return;
+    }
+    if (state.warningCode === "drift_stalled" || state.warningCode === "drift_idle") {
+      this._clearRuntimeWarning(state);
+    }
+  }
+
+  _pollDriftDetection() {
+    for (const key of this._states.keys()) {
+      this._refreshDriftWarning(key);
+    }
+  }
+
+  _serializeApprovalRequest(request) {
+    if (!request) return null;
+    return {
+      id: request.id,
+      status: request.status,
+      summary: request.summary,
+      excerpt: request.excerpt,
+      createdAt: request.createdAt,
+      expiresAt: request.expiresAt,
+      resolvedAt: request.resolvedAt ?? null,
+      decision: request.decision ?? null,
+    };
+  }
+
+  _serializeRuntimeSnapshot() {
+    return {
+      version: SNAPSHOT_VERSION,
+      savedAt: new Date().toISOString(),
+      entries: [...this._states.entries()].map(([key, state]) => ({
+        key,
+        agentName: state.agentName,
+        workspaceId: state.workspaceId,
+        workdir: state.workdir ?? null,
+        sessionRef: state.sessionRef ?? null,
+        status: state.status,
+        hasProcess: this._ptys.has(key),
+        readyForPrompt: Boolean(state.readyForPrompt),
+        authRequired: Boolean(state.authRequired),
+        manualInputDirty: Boolean(state.manualInputDirty),
+        lastOutputAt: state.lastOutputAt ?? null,
+        runId: state.runId ?? null,
+        configStale: Boolean(state.configStale),
+        configWarning: String(state.configWarning || ""),
+        warningCode: String(state.warningCode || ""),
+        warningMessage: String(state.warningMessage || ""),
+        approvalRequest: this._serializeApprovalRequest(state.approvalRequest),
+        quotaNotice: state.quotaNotice
+          ? {
+              ...state.quotaNotice,
+            }
+          : null,
+      })),
+    };
+  }
+
+  _writeRuntimeSnapshotNow() {
+    if (!this.config?.runtimeStatePath) return false;
+    clearTimeout(this._snapshotWriteTimer);
+    this._snapshotWriteTimer = null;
+    return writeJsonFileSafe(this.config.runtimeStatePath, this._serializeRuntimeSnapshot());
+  }
+
+  _scheduleSnapshotWrite() {
+    if (!this.config?.runtimeStatePath) return;
+    clearTimeout(this._snapshotWriteTimer);
+    this._snapshotWriteTimer = setTimeout(() => {
+      this._snapshotWriteTimer = null;
+      this._writeRuntimeSnapshotNow();
+    }, SNAPSHOT_WRITE_DEBOUNCE_MS);
+  }
+
+  restoreRuntimeSnapshot() {
+    const snapshot = this.config?.runtimeStatePath
+      ? readJsonFileSafe(this.config.runtimeStatePath)
+      : null;
+    if (!snapshot || !Array.isArray(snapshot.entries)) {
+      return { restoredCount: 0, recoveredCount: 0 };
+    }
+
+    let restoredCount = 0;
+    let recoveredCount = 0;
+    for (const entry of snapshot.entries) {
+      const agentName = String(entry?.agentName || "").trim();
+      const workspaceId = String(entry?.workspaceId || "").trim();
+      if (!agentName || !workspaceId) continue;
+      if (!this.agentRegistry.get(agentName)) continue;
+      const workspace = this.store?.getWorkspace?.(workspaceId);
+      if (!workspace) continue;
+
+      const key = this._key(agentName, workspaceId);
+      const state = this._ensureState(key, agentName, workspaceId);
+      const previousStatus = String(entry?.status || "idle");
+      const needsRecovery =
+        Boolean(entry?.hasProcess) ||
+        ["running", "manual_running", "waiting_input", "quota_wait"].includes(previousStatus);
+
+      state.workdir =
+        String(entry?.workdir || "").trim() ||
+        this._resolveWorkspaceAgentWorkdir(agentName, workspace);
+      state.sessionRef = String(entry?.sessionRef || "").trim() || null;
+      state.lastOutputAt = entry?.lastOutputAt ?? null;
+      state.status = previousStatus === "error" ? "error" : "idle";
+      state.readyForPrompt = false;
+      state.authRequired = false;
+      state.runId = null;
+      state.promptText = "";
+      state.promptSentAt = null;
+      state.idleRawBuffer = "";
+      state.rawBuffer = "";
+      state.scrollbackSnapshot = "";
+      state.turnActivitySeen = false;
+      state.streamedText = "";
+      state.codexEmptyCompletionRetries = 0;
+      state.codexExactCompletionRetries = 0;
+      state.codexUpdatePromptDismissals = 0;
+      state.configStale = Boolean(entry?.configStale);
+      state.configWarning = String(entry?.configWarning || "");
+      state.quotaNotice = entry?.quotaNotice ? { ...entry.quotaNotice } : null;
+      this._clearApprovalRequest(key, { emit: false });
+
+      if (needsRecovery) {
+        recoveredCount += 1;
+        this._setRuntimeWarning(
+          state,
+          "runtime_recovered",
+          `サーバー再起動により直前の ${previousStatus} PTY は失われました。safe idle に戻したので、Terminal を開くか prompt を再送してください。`,
+        );
+        if (String(entry?.runId || "").trim()) {
+          this.store?.recoverRun?.(String(entry.runId), "interrupted");
+        }
+      } else {
+        this._setRuntimeWarning(
+          state,
+          String(entry?.warningCode || "").trim(),
+          String(entry?.warningMessage || "").trim(),
+        );
+      }
+
+      if (state.sessionRef) {
+        this.store?.upsertAgentSession?.({
+          agentName,
+          workspaceId,
+          providerSessionRef: state.sessionRef,
+          model: this.agentRegistry.get(agentName)?.model ?? null,
+          workdir: state.workdir,
+          lastRunState: needsRecovery ? "interrupted" : previousStatus,
+        });
+      }
+      restoredCount += 1;
+    }
+
+    this._scheduleSnapshotWrite();
+    return { restoredCount, recoveredCount };
+  }
+
+  _emitObserverNotice(state, kind, message, extra = {}) {
+    if (!state) return;
+    const normalizedKind = String(kind || "").trim();
+    const normalizedMessage = String(message || "").trim();
+    if (!normalizedKind || !normalizedMessage) return;
+    const noticeKey = `${normalizedKind}:${normalizedMessage}`;
+    if (state.lastObserverNoticeKey === noticeKey) return;
+    state.lastObserverNoticeKey = noticeKey;
+    this._emit("observer.notice", {
+      agentName: state.agentName,
+      workspaceId: state.workspaceId,
+      status: state.status,
+      kind: normalizedKind,
+      message: normalizedMessage,
+      ...extra,
+    });
+  }
+
+  _clearApprovalRequest(key, { emit = false, decision = null } = {}) {
+    const state = this._states.get(key);
+    if (!state?.approvalRequest) return null;
+    clearTimeout(state.approvalTimer);
+    state.approvalTimer = null;
+    const previous = state.approvalRequest;
+    state.approvalRequest = null;
+    if (emit) {
+      this._emit("approval.resolved", {
+        agentName: state.agentName,
+        workspaceId: state.workspaceId,
+        approval: {
+          ...this._serializeApprovalRequest(previous),
+          decision: decision ?? previous.decision ?? null,
+        },
+      });
+    }
+    this._scheduleSnapshotWrite();
+    return previous;
+  }
+
+  _expireApprovalRequest(key, approvalId) {
+    const state = this._states.get(key);
+    if (!state?.approvalRequest || state.approvalRequest.id !== approvalId) return;
+    clearTimeout(state.approvalTimer);
+    state.approvalTimer = null;
+    state.approvalRequest = {
+      ...state.approvalRequest,
+      status: "expired",
+      resolvedAt: new Date().toISOString(),
+    };
+    this._emit("approval.expired", {
+      agentName: state.agentName,
+      workspaceId: state.workspaceId,
+      approval: this._serializeApprovalRequest(state.approvalRequest),
+    });
+    this._emitObserverNotice(state, "approval_expired", `${state.agentName} の承認待ちが期限切れになりました。`);
+    this._scheduleSnapshotWrite();
+  }
+
+  _createApprovalRequest(key, text) {
+    const state = this._states.get(key);
+    if (!state) return null;
+    const agentType = this.agentRegistry.get(state.agentName)?.type ?? "codex";
+    const h = getHeuristics(agentType);
+    const summary = summarizeRuntimeNotice(text, h.approvalRe || h.waitingInputRe);
+    if (!summary) return null;
+    if (
+      state.approvalRequest?.status === "pending" &&
+      String(state.approvalRequest.summary || "") === summary
+    ) {
+      return state.approvalRequest;
+    }
+    clearTimeout(state.approvalTimer);
+    const approval = {
+      id: randomUUID(),
+      status: "pending",
+      summary,
+      excerpt: summarizeRuntimeNotice(text, h.approvalRe || h.waitingInputRe, 320),
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
+    };
+    state.approvalRequest = approval;
+    state.approvalTimer = setTimeout(() => this._expireApprovalRequest(key, approval.id), APPROVAL_TIMEOUT_MS);
+    this._emit("approval.requested", {
+      agentName: state.agentName,
+      workspaceId: state.workspaceId,
+      approval: this._serializeApprovalRequest(approval),
+    });
+    this._emitObserverNotice(state, "approval_requested", `${state.agentName} が承認待ちです: ${summary}`);
+    this._scheduleSnapshotWrite();
+    return approval;
+  }
+
+  _setQuotaWaitState(key, text) {
+    const state = this._states.get(key);
+    if (!state) return;
+    const agentType = this.agentRegistry.get(state.agentName)?.type ?? "codex";
+    const h = getHeuristics(agentType);
+    const summary = summarizeRuntimeNotice(text, h.quotaRe);
+    if (!summary) return;
+    state.status = "quota_wait";
+    state.readyForPrompt = false;
+    state.authRequired = false;
+    state.quotaNotice = {
+      summary,
+      detectedAt: state.quotaNotice?.detectedAt ?? new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    };
+    this._setRuntimeWarning(
+      state,
+      "quota_wait",
+      `利用制限を検知しました。復帰したら Terminal を開くか prompt を再送してください。`,
+    );
+    this._emitObserverNotice(state, "quota_wait", `${state.agentName} で利用制限を検知しました: ${summary}`);
+    this._scheduleSnapshotWrite();
   }
 
   _makeSessionWorkdirKey(agentType, workdir) {
@@ -2368,6 +3077,18 @@ export class PtyService {
     return this._spawnPty(agentName, workspaceId, options);
   }
 
+  async prewarmAgent({ agentName, workspaceId, workdir, waitForReadyMs = 4000 } = {}) {
+    const key = this._key(agentName, workspaceId);
+    const ptyProc = this.ensureAgentPty(agentName, workspaceId, { workdir });
+    if (!ptyProc) {
+      throw new Error(`PTY を起動できません: ${agentName}`);
+    }
+    if (waitForReadyMs > 0) {
+      await this._waitForPrewarmState(key, waitForReadyMs);
+    }
+    return this.getAgentTerminalState(agentName, workspaceId);
+  }
+
   /**
    * Send a prompt to the agent's interactive PTY stdin.
    * The SAME PTY that the Terminal tab displays.
@@ -2395,12 +3116,20 @@ export class PtyService {
     state.runId = runId;
     state.promptText = prompt;
     state.readyForPrompt = false;
+    state.authRequired = false;
     state.turnActivitySeen = false;
     state.scrollbackSnapshot = stripAnsi(this._scrollback.get(key) ?? "");
     state.codexEmptyCompletionRetries = 0;
+    state.codexExactCompletionRetries = 0;
     state._completedByReadyReturn = false;
     state.streamedText = "";
+    state.quotaNotice = null;
+    state.lastObserverNoticeKey = "";
+    this._clearApprovalRequest(key, { emit: false });
+    this._clearRuntimeWarning(state, "runtime_recovered");
+    this._clearRuntimeWarning(state, "quota_wait");
     this._resetManualInputState(state);
+    this._scheduleSnapshotWrite();
 
     const resultPromise = new Promise((resolve, reject) => {
       state.pendingResolve = resolve;
@@ -2431,6 +3160,9 @@ export class PtyService {
     }
     if (state.status === "waiting_input") {
       throw new Error(`${agentName} は入力待ちです。Terminal で応答してください。`);
+    }
+    if (state.status === "quota_wait") {
+      throw new Error(`${agentName} は利用制限待ちです。復帰通知後に再送してください。`);
     }
     if (state.manualInputDirty) {
       throw this._buildManualInputBusyError();
@@ -2485,13 +3217,20 @@ export class PtyService {
       this._scrollback.delete(key);
       killed = true;
     }
+    if (killed) {
+      this._scheduleSnapshotWrite();
+    }
     return killed;
   }
 
   /** Kill all PTYs (server shutdown). */
   stopAll() {
+    clearInterval(this._driftTimer);
     for (const key of [...this._ptys.keys()]) {
       this._syncSessionRefNow(key, "shutdown");
+    }
+    this._writeRuntimeSnapshotNow();
+    for (const key of [...this._ptys.keys()]) {
       this._killKey(key);
     }
   }
@@ -2499,6 +3238,7 @@ export class PtyService {
   /** Returns terminal state for an agent×workspace. */
   getAgentTerminalState(agentName, workspaceId) {
     const key = this._key(agentName, workspaceId);
+    this._refreshDriftWarning(key);
     const state = this._states.get(key);
     if (!state) return { status: "idle", hasProcess: false };
     const hasProcess = this._ptys.has(key);
@@ -2511,6 +3251,255 @@ export class PtyService {
       manualInputDirty: Boolean(state.manualInputDirty),
       configStale: hasProcess ? Boolean(state.configStale) : false,
       configWarning: hasProcess ? String(state.configWarning || "") : "",
+      warningCode: String(state.warningCode || ""),
+      warningMessage: String(state.warningMessage || ""),
+      approvalRequest: this._serializeApprovalRequest(state.approvalRequest),
+      quotaNotice: state.quotaNotice ? { ...state.quotaNotice } : null,
+    };
+  }
+
+  listWorkspaceTerminalStates(workspaceId) {
+    const normalizedWorkspaceId = String(workspaceId ?? "").trim();
+    const states = [];
+    for (const [key, state] of this._states.entries()) {
+      if (!key.startsWith(`${normalizedWorkspaceId}:`)) continue;
+      states.push({
+        agentName: state.agentName,
+        workspaceId: state.workspaceId,
+        ...this.getAgentTerminalState(state.agentName, state.workspaceId),
+      });
+    }
+    return states;
+  }
+
+  annotateWorkspaceRuntime(workspaceId, code, message) {
+    const normalizedWorkspaceId = String(workspaceId ?? "").trim();
+    for (const [key, state] of this._states.entries()) {
+      if (!key.startsWith(`${normalizedWorkspaceId}:`)) continue;
+      this._setRuntimeWarning(state, code, message);
+      this._emitObserverNotice(state, code, message);
+    }
+    this._scheduleSnapshotWrite();
+  }
+
+  validateStoredSessionBinding(agentName, workspaceId) {
+    const session = this.store?.getAgentSession?.(agentName, workspaceId);
+    if (!session?.providerSessionRef) {
+      return { valid: false, reasons: ["provider session ref がありません。"] };
+    }
+    const workspace = this.store?.getWorkspace?.(workspaceId);
+    const workdir =
+      String(session.workdir || "").trim() ||
+      String(workspace?.workdir || "").trim() ||
+      String(this.config?.codexWorkdir || "").trim();
+    const agentType = this._getSessionProviderType(agentName);
+    const historyEntries = this._loadProviderSessionHistory(agentType, { forceRefresh: true });
+    const valid = this._sessionRefExistsInHistory(agentType, session.providerSessionRef, workdir, historyEntries);
+    return {
+      valid,
+      reasons: valid ? [] : ["provider local history に一致する saved session ref がありません。"],
+    };
+  }
+
+  getRestartEligibility(agentName, workspaceId, { force = false } = {}) {
+    const state = this._ensureState(this._key(agentName, workspaceId), agentName, workspaceId);
+    const blockedReasons = [];
+    if (!force) {
+      if (state.manualInputDirty) blockedReasons.push("未送信の Terminal 入力があります。");
+      if (state.approvalRequest?.status === "pending") blockedReasons.push("承認待ちです。");
+      if (state.status === "running" || state.status === "manual_running") blockedReasons.push("実行中です。");
+      if (state.status === "waiting_input") blockedReasons.push("入力待ちです。");
+      if (state.status === "quota_wait") blockedReasons.push("利用制限待ちです。");
+    }
+    return {
+      allowed: blockedReasons.length === 0,
+      blockedReasons,
+      state: this.getAgentTerminalState(agentName, workspaceId),
+    };
+  }
+
+  async restartAgent(agentName, workspaceId, { workdir, waitForReadyMs = 4000, force = false } = {}) {
+    const eligibility = this.getRestartEligibility(agentName, workspaceId, { force });
+    if (!eligibility.allowed) {
+      throw new Error(eligibility.blockedReasons.join(" / "));
+    }
+    const key = this._key(agentName, workspaceId);
+    this._syncSessionRefNow(key, force ? "force-restart" : "restart");
+    this._killKey(key);
+    if (force) {
+      const state = this._ensureState(key, agentName, workspaceId);
+      this._setRuntimeWarning(state, "force_restart", "force restart を実行しました。直前の PTY 文脈が失われている可能性があります。");
+    }
+    return this.prewarmAgent({ agentName, workspaceId, workdir, waitForReadyMs });
+  }
+
+  getAgentTerminalOutput(agentName, workspaceId, { lineLimit = 50 } = {}) {
+    const key = this._key(agentName, workspaceId);
+    const state = this._states.get(key);
+    const terminalState = this.getAgentTerminalState(agentName, workspaceId);
+    const rawText = this._scrollback.get(key) ?? state?.rawBuffer ?? "";
+    const cleanText = stripAnsi(String(rawText || "")).replace(/\r/g, "").trimEnd();
+    const normalizedLimit =
+      Number.isFinite(lineLimit) && lineLimit > 0
+        ? Math.max(1, Math.floor(lineLimit))
+        : 50;
+    const allLines = cleanText ? cleanText.split("\n") : [];
+    const truncated = allLines.length > normalizedLimit;
+    const visibleLines = truncated ? allLines.slice(-normalizedLimit) : allLines;
+    return {
+      ...terminalState,
+      text: visibleLines.join("\n").trim(),
+      totalLineCount: allLines.length,
+      lineLimit: normalizedLimit,
+      truncated,
+    };
+  }
+
+  sendTerminalInput(agentName, workspaceId, data, options = {}) {
+    if (!workspaceId) {
+      return { ok: false, reason: "workspace_required" };
+    }
+    const key = this._key(agentName, workspaceId);
+    let ptyProc = this._ptys.get(key);
+    if (!ptyProc) {
+      return {
+        ok: false,
+        reason: "not_started",
+        state: this.getAgentTerminalState(agentName, workspaceId),
+      };
+    }
+    ptyProc = this._forwardTerminalInput({
+      key,
+      agentName,
+      workspaceId,
+      workdir: options.workdir,
+      data,
+      ptyProc,
+    }) ?? ptyProc;
+    return {
+      ok: true,
+      ptyProc,
+      state: this.getAgentTerminalState(agentName, workspaceId),
+    };
+  }
+
+  async sendRemoteCommand({
+    agentName,
+    workspaceId,
+    command,
+    workdir,
+    source = "ui",
+    metadata = null,
+  }) {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    const normalizedCommand = String(command ?? "").trim();
+    if (!normalizedCommand.startsWith("/")) {
+      throw new Error("slash command must start with /");
+    }
+    if (/[\r\n]/u.test(normalizedCommand)) {
+      throw new Error("slash command must be a single line");
+    }
+    const { key, ptyProc } = await this.assertPromptReady({
+      agentName,
+      workspaceId,
+      workdir,
+    });
+    const agentType = this.agentRegistry.get(agentName)?.type ?? "codex";
+    let nextPtyProc =
+      this._forwardTerminalInput({
+        key,
+        agentName,
+        workspaceId,
+        workdir,
+        data: normalizedCommand,
+        ptyProc,
+        source,
+        metadata,
+      }) ?? ptyProc;
+    await new Promise((resolve) => setTimeout(resolve, getPromptSubmitDelay(agentType, normalizedCommand)));
+    nextPtyProc =
+      this._forwardTerminalInput({
+        key,
+        agentName,
+        workspaceId,
+        workdir,
+        data: "\r",
+        ptyProc: nextPtyProc,
+        source,
+        metadata,
+      }) ?? nextPtyProc;
+    return {
+      ok: true,
+      ptyProc: nextPtyProc,
+      state: this.getAgentTerminalState(agentName, workspaceId),
+      text: "",
+      finalStatus: "running",
+    };
+  }
+
+  getAgentApprovalState(agentName, workspaceId) {
+    const key = this._key(agentName, workspaceId);
+    const state = this._states.get(key);
+    return this._serializeApprovalRequest(state?.approvalRequest);
+  }
+
+  respondToApproval(agentName, workspaceId, decision, options = {}) {
+    const normalizedDecision = String(decision || "").trim().toLowerCase();
+    if (!["approve", "deny"].includes(normalizedDecision)) {
+      return { ok: false, reason: "invalid_decision" };
+    }
+    const key = this._key(agentName, workspaceId);
+    const state = this._states.get(key);
+    const ptyProc = this._ptys.get(key);
+    if (!state?.approvalRequest || state.approvalRequest.status !== "pending") {
+      return {
+        ok: false,
+        reason: "approval_not_pending",
+        state: this.getAgentTerminalState(agentName, workspaceId),
+      };
+    }
+    if (!ptyProc) {
+      return {
+        ok: false,
+        reason: "not_started",
+        state: this.getAgentTerminalState(agentName, workspaceId),
+      };
+    }
+    const approval = {
+      ...state.approvalRequest,
+      status: "resolved",
+      decision: normalizedDecision,
+      resolvedAt: new Date().toISOString(),
+    };
+    clearTimeout(state.approvalTimer);
+    state.approvalTimer = null;
+    state.approvalRequest = approval;
+    this._emit("approval.resolved", {
+      agentName,
+      workspaceId,
+      approval: this._serializeApprovalRequest(approval),
+    });
+    this._emitObserverNotice(
+      state,
+      normalizedDecision === "approve" ? "approval_approved" : "approval_denied",
+      `${agentName} の承認待ちに ${normalizedDecision === "approve" ? "approve" : "deny"} を送りました。`,
+    );
+    this._scheduleSnapshotWrite();
+    const nextPtyProc = this._forwardTerminalInput({
+      key,
+      agentName,
+      workspaceId,
+      workdir: options.workdir,
+      data: normalizedDecision === "approve" ? "y\r" : "n\r",
+      ptyProc,
+    });
+    return {
+      ok: true,
+      ptyProc: nextPtyProc,
+      approval: this.getAgentApprovalState(agentName, workspaceId),
+      state: this.getAgentTerminalState(agentName, workspaceId),
     };
   }
 
@@ -2527,7 +3516,11 @@ export class PtyService {
       if (!this._ptys.has(key)) continue;
       state.configStale = true;
       state.configWarning = warning;
+      this._emitObserverNotice(state, "config_stale", `${normalizedAgentName} の設定変更が未反映です。必要なら再起動してください。`);
       workspaceIds.push(state.workspaceId);
+    }
+    if (workspaceIds.length > 0) {
+      this._scheduleSnapshotWrite();
     }
     return { count: workspaceIds.length, workspaceIds };
   }
@@ -2575,6 +3568,7 @@ export class PtyService {
     if (!wasKnown) {
       console.log(`[pty] session ref synced for ${key} (${reason}) → ${normalizedSessionRef}`);
     }
+    this._scheduleSnapshotWrite();
     return normalizedSessionRef;
   }
 
@@ -2716,6 +3710,11 @@ export class PtyService {
     state.promptText = "";
     state.configStale = false;
     state.configWarning = "";
+    state.quotaNotice = null;
+    state.codexUpdatePromptDismissals = 0;
+    this._clearRuntimeWarning(state);
+    this._clearApprovalRequest(key, { emit: false });
+    this._scheduleSnapshotWrite();
 
     ptyProc.onData((data) => this._handleOutput(key, data));
     this._queueSessionRefSync(key, "spawn");
@@ -2739,9 +3738,14 @@ export class PtyService {
         s.promptText = "";
         s.configStale = false;
         s.configWarning = "";
+        s.quotaNotice = null;
+        s.codexUpdatePromptDismissals = 0;
+        this._clearRuntimeWarning(s);
+        this._clearApprovalRequest(key, { emit: false });
         this._resetManualInputState(s);
         s._completedByReadyReturn = false;
       }
+      this._scheduleSnapshotWrite();
     });
 
     return ptyProc;
@@ -2776,9 +3780,22 @@ export class PtyService {
     const h = getHeuristics(agent?.type ?? "codex");
 
     // ── READY prompt detection (startup / waiting_input / manual input completion) ──
-    if (!state.readyForPrompt && ["idle", "waiting_input"].includes(state.status)) {
+    if (!state.readyForPrompt && ["idle", "waiting_input", "quota_wait"].includes(state.status)) {
       state.idleRawBuffer = `${state.idleRawBuffer}${rawData}`.slice(-32768);
       const idleText = stripAnsi(state.idleRawBuffer);
+      if (agent?.type === "codex" && isCodexUpdateSelectionPrompt(idleText)) {
+        const ptyProc = this._ptys.get(key);
+        if (ptyProc && (state.codexUpdatePromptDismissals ?? 0) < 2) {
+          state.codexUpdatePromptDismissals = (state.codexUpdatePromptDismissals ?? 0) + 1;
+          try {
+            ptyProc.write("\u001b[B\r");
+            console.log(`[pty] auto-skipped Codex update prompt for ${key}`);
+          } catch (error) {
+            console.warn(`[pty] failed to auto-skip Codex update prompt for ${key}: ${error?.message || error}`);
+          }
+          return;
+        }
+      }
       if (matchesHeuristic(h, "readyRe", idleText, state.promptText)) {
         const pendingWaitingRun = state.status === "waiting_input" && Boolean(state.pendingResolve);
         if (pendingWaitingRun) {
@@ -2788,12 +3805,22 @@ export class PtyService {
         }
         const wasBlocked =
           state.status === "waiting_input" ||
+          state.status === "quota_wait" ||
           state.authRequired;
+        const recoveredFromQuota = state.status === "quota_wait" || Boolean(state.quotaNotice);
+        const preserveManualDraft = !wasBlocked && state.manualInputDirty;
         state.authRequired = false;
         state.readyForPrompt = true;
         state.idleRawBuffer = "";
         state.status = "idle";
-        this._resetManualInputState(state);
+        state.quotaNotice = null;
+        state.lastObserverNoticeKey = "";
+        this._clearRuntimeWarning(state, "quota_wait");
+        this._clearRuntimeWarning(state, "runtime_recovered");
+        this._clearApprovalRequest(key, { emit: false });
+        if (!preserveManualDraft) {
+          this._resetManualInputState(state);
+        }
         state._completedByReadyReturn = false;
         console.log(`[pty] CLI ready for ${key}`);
         this._queueSessionRefSync(key, "ready");
@@ -2804,18 +3831,25 @@ export class PtyService {
             status: "idle",
           });
         }
+        if (recoveredFromQuota) {
+          this._emitObserverNotice(state, "quota_recovered", `${state.agentName} が再び入力可能になりました。`);
+        }
+        this._scheduleSnapshotWrite();
         return;
       }
       if (h.authRequiredRe?.test(idleText)) {
         state.authRequired = true;
         if (state.status !== "waiting_input") {
           state.status = "waiting_input";
+          this._clearApprovalRequest(key, { emit: false });
           this._emit("status.change", {
             agentName: state.agentName,
             workspaceId: state.workspaceId,
             status: "waiting_input",
             runId: state.runId,
           });
+          this._emitObserverNotice(state, "waiting_input", `${state.agentName} が認証または確認入力待ちです。`);
+          this._scheduleSnapshotWrite();
         }
         return;
       }
@@ -2829,6 +3863,7 @@ export class PtyService {
       const plain = stripAnsi(rawData);
       const fullPlain = stripAnsi(state.rawBuffer);
       const authSafePlain = stripPromptEcho(plain, state.promptText);
+      const authSafeFullPlain = stripPromptEcho(fullPlain, state.promptText);
       if (h.authRequiredRe?.test(authSafePlain)) {
         state.authRequired = true;
         state.status = "waiting_input";
@@ -2838,12 +3873,38 @@ export class PtyService {
         state.turnActivitySeen = false;
         state.scrollbackSnapshot = "";
         state.manualTurnPersist = false;
+        this._clearApprovalRequest(key, { emit: false });
         this._resetManualInputState(state);
+        this._resetManualTurnMetadata(state);
         this._emit("status.change", {
           agentName: state.agentName,
           workspaceId: state.workspaceId,
           status: "waiting_input",
         });
+        this._emitObserverNotice(state, "waiting_input", `${state.agentName} が認証または確認入力待ちです。`);
+        this._scheduleSnapshotWrite();
+        return;
+      }
+      if (h.quotaRe?.test(authSafePlain) || h.quotaRe?.test(authSafeFullPlain)) {
+        const manualTurnPayload = this._buildManualTurnPayload(key, "quota_wait");
+        this._clearTimers(key);
+        state.promptText = "";
+        state.turnActivitySeen = false;
+        state.scrollbackSnapshot = "";
+        state.rawBuffer = "";
+        state.manualTurnPersist = false;
+        this._clearApprovalRequest(key, { emit: false });
+        this._resetManualInputState(state);
+        this._setQuotaWaitState(key, `${authSafeFullPlain}\n${authSafePlain}`);
+        this._resetManualTurnMetadata(state);
+        this._emit("status.change", {
+          agentName: state.agentName,
+          workspaceId: state.workspaceId,
+          status: "quota_wait",
+        });
+        if (manualTurnPayload) {
+          this._emit("terminal.turn.done", manualTurnPayload);
+        }
         return;
       }
       if (h.waitingInputRe.test(plain) && !h.stillRunningRe.test(plain)) {
@@ -2855,7 +3916,14 @@ export class PtyService {
         state.scrollbackSnapshot = "";
         state.rawBuffer = "";
         state.manualTurnPersist = false;
+        if (h.approvalRe?.test(authSafePlain) || h.approvalRe?.test(authSafeFullPlain)) {
+          this._createApprovalRequest(key, authSafeFullPlain);
+        } else {
+          this._clearApprovalRequest(key, { emit: false });
+          this._emitObserverNotice(state, "waiting_input", `${state.agentName} が入力待ちです。`);
+        }
         this._resetManualInputState(state);
+        this._resetManualTurnMetadata(state);
         this._emit("status.change", {
           agentName: state.agentName,
           workspaceId: state.workspaceId,
@@ -2864,14 +3932,29 @@ export class PtyService {
         if (manualTurnPayload) {
           this._emit("terminal.turn.done", manualTurnPayload);
         }
+        this._scheduleSnapshotWrite();
+        return;
       }
       if (h.stillRunningRe.test(authSafePlain) || /(?:^|\n)\s*●\s+/u.test(fullPlain)) {
         state.turnActivitySeen = true;
       }
+      const agentType = agent?.type ?? "codex";
+      const transcriptSoFar = this._getStreamingTranscript(key, state, agentType);
+      const transcriptContaminated = transcriptLooksContaminatedByPromptEcho(
+        agentType,
+        transcriptSoFar,
+        state.promptText,
+      );
+      const transcriptMeaningful = transcriptLooksMeaningfulForCompletion(
+        agentType,
+        transcriptSoFar,
+        state.promptText,
+      );
       const strippedSoFar = stripPromptEcho(fullPlain, state.promptText);
       if (
         state.turnActivitySeen &&
-        strippedSoFar.length > 20 &&
+        transcriptMeaningful &&
+        strippedSoFar.length > READY_RETURN_MIN_CHARS &&
         (
           matchesHeuristic(h, "readyReturnRe", plain, state.promptText) ||
           matchesHeuristic(h, "readyReturnRe", strippedSoFar, state.promptText)
@@ -2882,7 +3965,7 @@ export class PtyService {
         state.completionTimer = setTimeout(() => this._completeManualTurn(key), MANUAL_COMPLETION_SETTLE_MS);
         return;
       }
-      if (!state._completedByReadyReturn && plain.trim()) {
+      if (!state._completedByReadyReturn && plain.trim() && transcriptMeaningful) {
         clearTimeout(state.completionTimer);
         state.completionTimer = setTimeout(() => this._completeManualTurn(key), MANUAL_COMPLETION_SILENCE_MS);
       }
@@ -2903,11 +3986,19 @@ export class PtyService {
       state.authRequired = true;
       state.status = "waiting_input";
       state.readyForPrompt = false;
+      this._clearApprovalRequest(key, { emit: false });
+      this._emitObserverNotice(state, "waiting_input", `${state.agentName} が認証または確認入力待ちです。`);
+      this._scheduleSnapshotWrite();
       this._rejectPending(key, this._buildAuthRequiredError(state));
       return;
     }
 
     state.rawBuffer += rawData;
+    if (h.quotaRe?.test(authSafePlain) || h.quotaRe?.test(authSafeFullPlain)) {
+      this._setQuotaWaitState(key, `${authSafeFullPlain}\n${authSafePlain}`);
+      this._completeRun(key, "quota_wait");
+      return;
+    }
     if (h.stillRunningRe.test(authSafePlain) || h.stillRunningRe.test(authSafeFullPlain)) {
       state.turnActivitySeen = true;
     }
@@ -2928,12 +4019,19 @@ export class PtyService {
       if (state.status !== "waiting_input") {
         state.status = "waiting_input";
         state.readyForPrompt = false;
+        if (h.approvalRe?.test(authSafePlain) || h.approvalRe?.test(authSafeFullPlain)) {
+          this._createApprovalRequest(key, authSafeFullPlain);
+        } else {
+          this._clearApprovalRequest(key, { emit: false });
+          this._emitObserverNotice(state, "waiting_input", `${state.agentName} が入力待ちです。`);
+        }
         this._emit("status.change", {
           agentName: state.agentName,
           workspaceId: state.workspaceId,
           status: "waiting_input",
           runId: state.runId,
         });
+        this._scheduleSnapshotWrite();
       }
     }
 
@@ -2953,7 +4051,7 @@ export class PtyService {
     if (
       agent?.type !== "copilot" &&
       state.turnActivitySeen &&
-      strippedSoFar.length > 200 &&
+      strippedSoFar.length > READY_RETURN_MIN_CHARS &&
       (
         matchesHeuristic(h, "readyReturnRe", plain, state.promptText) ||
         matchesHeuristic(h, "readyReturnRe", strippedSoFar, state.promptText)
@@ -3024,6 +4122,28 @@ export class PtyService {
     await new Promise((r) => setTimeout(r, getReadySettleDelay(agentType)));
   }
 
+  async _waitForPrewarmState(key, timeoutMs = 4000) {
+    const start = Date.now();
+    while (true) {
+      const state = this._states.get(key);
+      if (!state || !this._ptys.has(key)) {
+        return;
+      }
+      if (
+        state.readyForPrompt ||
+        state.status === "waiting_input" ||
+        state.status === "quota_wait" ||
+        state.status === "error"
+      ) {
+        return;
+      }
+      if (Date.now() - start >= timeoutMs) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+
   // ── Completion ─────────────────────────────────────────────────────────────
 
   _scheduleCompletion(key) {
@@ -3079,14 +4199,22 @@ export class PtyService {
     state.readyForPrompt = false;
     state.scrollbackSnapshot = "";
     state.codexEmptyCompletionRetries = 0;
+    state.codexExactCompletionRetries = 0;
     state.streamedText = "";
     if (blockedStatus !== "waiting_input") {
       state.authRequired = false;
     }
     state._completedByReadyReturn = false;
+    this._setRuntimeWarning(
+      state,
+      "hard_timeout",
+      "長時間応答が止まったため stale 扱いにしました。Terminal を確認して必要なら再送してください。",
+    );
     this._resetManualInputState(state);
     state.status = blockedStatus;
     this._syncSessionRefAfterTurn(key, "timeout");
+    this._emitObserverNotice(state, "stale", `${state.agentName} の応答がタイムアウトしました。`);
+    this._scheduleSnapshotWrite();
 
     this._emit("status.change", {
       agentName: state.agentName,
@@ -3097,6 +4225,7 @@ export class PtyService {
     this._emit("run.done", {
       agentName: state.agentName,
       workspaceId: state.workspaceId,
+      runId: state.runId,
       text,
       finalStatus: "timeout",
     });
@@ -3168,15 +4297,35 @@ export class PtyService {
     const agent = this.agentRegistry.get(state.agentName);
     const agentType = agent?.type ?? "codex";
     let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
+    let fallbackText = "";
     if (usesScrollbackTranscriptFallback(agentType)) {
       const scrollbackText = this._getRunScrollback(key, state);
-      const fallbackText = sanitizeTranscript(agentType, scrollbackText, state.promptText);
+      fallbackText = sanitizeTranscript(agentType, scrollbackText, state.promptText);
       const preferredText = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
       if (preferredText && preferredText !== text && fallbackText) {
         console.log(`[pty] recovered richer ${agentType} response from scrollback for ${key}`);
       }
       text = preferredText;
     }
+    const exactTarget = extractExactReplyTarget(state.promptText);
+    if (
+      finalStatus === "completed" &&
+      agentType === "codex" &&
+      exactTarget &&
+      /\n/.test(exactTarget) &&
+      !exactReplyMatchesTarget(state.promptText, text)
+    ) {
+      state.codexExactCompletionRetries = (state.codexExactCompletionRetries ?? 0) + 1;
+      if (state.codexExactCompletionRetries < 3) {
+        clearTimeout(state.completionTimer);
+        state._completedByReadyReturn = false;
+        state.completionTimer = setTimeout(() => this._tryComplete(key), CODEX_EMPTY_COMPLETION_RETRY_MS);
+        console.log(`[pty] delaying codex completion for exact multiline target ${key}`);
+        return;
+      }
+      console.warn(`[pty] codex exact multiline target remained incomplete for ${key}`);
+    }
+    state.codexExactCompletionRetries = 0;
     if (finalStatus === "completed" && ["codex", "claude"].includes(agentType) && !text) {
       state.codexEmptyCompletionRetries = (state.codexEmptyCompletionRetries ?? 0) + 1;
       if (state.codexEmptyCompletionRetries >= 3) {
@@ -3198,31 +4347,54 @@ export class PtyService {
     }
     state.rawBuffer = "";
     state.promptText = "";
-    state.status = resolvedFinalStatus === "waiting_input" ? "waiting_input" : "idle";
+    state.status =
+      resolvedFinalStatus === "waiting_input" || resolvedFinalStatus === "quota_wait"
+        ? resolvedFinalStatus
+        : "idle";
     state.runId = null;
     state.promptSentAt = null;
     // Reset idleRawBuffer for next ready detection cycle
     state.idleRawBuffer = "";
-    state.readyForPrompt = resolvedFinalStatus === "waiting_input" ? false : true;
+    state.readyForPrompt =
+      resolvedFinalStatus === "waiting_input" || resolvedFinalStatus === "quota_wait"
+        ? false
+        : true;
     state.scrollbackSnapshot = "";
     state.turnActivitySeen = false;
     state.streamedText = "";
-    if (resolvedFinalStatus !== "waiting_input") {
+    if (!["waiting_input", "quota_wait"].includes(resolvedFinalStatus)) {
       state.authRequired = false;
+    }
+    if (resolvedFinalStatus !== "waiting_input") {
+      this._clearApprovalRequest(key, { emit: false });
+    }
+    if (resolvedFinalStatus !== "quota_wait") {
+      state.quotaNotice = null;
+      this._clearRuntimeWarning(state, "quota_wait");
+    }
+    if (resolvedFinalStatus === "completed") {
+      state.lastObserverNoticeKey = "";
+      this._clearRuntimeWarning(state, "hard_timeout");
+      this._clearRuntimeWarning(state, "runtime_recovered");
     }
     state._completedByReadyReturn = false;
     this._resetManualInputState(state);
     this._syncSessionRefAfterTurn(key, "run.complete");
+    this._scheduleSnapshotWrite();
 
     this._emit("status.change", {
       agentName: state.agentName,
       workspaceId: state.workspaceId,
-      status: resolvedFinalStatus === "waiting_input" ? "waiting_input" : "idle",
+      status:
+        resolvedFinalStatus === "waiting_input" || resolvedFinalStatus === "quota_wait"
+          ? resolvedFinalStatus
+          : "idle",
     });
 
     this._emit("run.done", {
       agentName: state.agentName,
       workspaceId: state.workspaceId,
+      runId: state.runId,
       text,
       finalStatus: resolvedFinalStatus,
     });
@@ -3249,7 +4421,13 @@ export class PtyService {
     state.codexEmptyCompletionRetries = 0;
     state.streamedText = "";
     state._completedByReadyReturn = false;
+    if (!keepWaitingInput) {
+      this._clearApprovalRequest(key, { emit: false });
+      state.quotaNotice = null;
+      this._clearRuntimeWarning(state, "quota_wait");
+    }
     this._resetManualInputState(state);
+    this._scheduleSnapshotWrite();
     if (state.pendingReject) {
       state.pendingReject(err);
       state.pendingResolve = null;
@@ -3286,6 +4464,12 @@ export class PtyService {
     state.manualInputBuffer = "";
   }
 
+  _resetManualTurnMetadata(state) {
+    if (!state) return;
+    state.manualTurnSource = "terminal";
+    state.manualTurnMetadata = null;
+  }
+
   _buildManualTurnPayload(key, finalStatus) {
     const state = this._states.get(key);
     if (!state?.manualTurnPersist) return null;
@@ -3295,9 +4479,17 @@ export class PtyService {
     const agent = this.agentRegistry.get(state.agentName);
     const agentType = agent?.type ?? "codex";
     let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
+    let fallbackText = "";
     if (usesScrollbackTranscriptFallback(agentType)) {
-      const fallbackText = sanitizeTranscript(agentType, this._getRunScrollback(key, state), state.promptText);
+      fallbackText = sanitizeTranscript(agentType, this._getRunScrollback(key, state), state.promptText);
       text = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
+    }
+    if (
+      transcriptLooksContaminatedByPromptEcho(agentType, text, state.promptText) &&
+      fallbackText &&
+      !transcriptLooksContaminatedByPromptEcho(agentType, fallbackText, state.promptText)
+    ) {
+      text = fallbackText;
     }
 
     return {
@@ -3306,6 +4498,8 @@ export class PtyService {
       prompt,
       text,
       finalStatus,
+      source: state.manualTurnSource || "terminal",
+      metadata: state.manualTurnMetadata ? { ...state.manualTurnMetadata } : null,
     };
   }
 
@@ -3323,10 +4517,18 @@ export class PtyService {
     state.turnActivitySeen = false;
     state.scrollbackSnapshot = "";
     state.manualTurnPersist = false;
+    state.lastObserverNoticeKey = "";
+    this._clearRuntimeWarning(state, "hard_timeout");
+    this._clearRuntimeWarning(state, "runtime_recovered");
+    this._clearRuntimeWarning(state, "quota_wait");
+    state.quotaNotice = null;
+    this._clearApprovalRequest(key, { emit: false });
     this._resetManualInputState(state);
+    this._resetManualTurnMetadata(state);
     state._completedByReadyReturn = false;
     console.log(`[pty] CLI ready for ${key}`);
     this._syncSessionRefAfterTurn(key, "manual.complete");
+    this._scheduleSnapshotWrite();
     this._emit("status.change", {
       agentName: state.agentName,
       workspaceId: state.workspaceId,
@@ -3403,8 +4605,14 @@ export class PtyService {
     state.idleRawBuffer = "";
     state.scrollbackSnapshot = stripAnsi(this._scrollback.get(key) ?? "");
     state.manualTurnPersist = !interactiveReply && Boolean(submittedText);
+    state.quotaNotice = null;
+    this._clearRuntimeWarning(state, "quota_wait");
+    this._clearRuntimeWarning(state, "hard_timeout");
+    this._clearRuntimeWarning(state, "runtime_recovered");
+    this._clearApprovalRequest(key, { emit: false });
     state._completedByReadyReturn = false;
     this._resetManualInputState(state);
+    this._scheduleSnapshotWrite();
     this._emit("status.change", {
       agentName: state.agentName,
       workspaceId: state.workspaceId,
@@ -3412,11 +4620,49 @@ export class PtyService {
     });
   }
 
+  _forwardTerminalInput({ key, agentName, workspaceId, workdir, data, ptyProc = null, source = null, metadata = undefined }) {
+    let nextPtyProc = ptyProc ?? this._ptys.get(key);
+    if (!nextPtyProc) {
+      return null;
+    }
+    const state = this._ensureState(key, agentName, workspaceId);
+    if (source) {
+      state.manualTurnSource = source;
+    }
+    if (metadata !== undefined) {
+      state.manualTurnMetadata = metadata ? { ...metadata } : null;
+    }
+    if (data === "\u0003") {
+      this._resetManualInputState(state);
+      this._resetManualTurnMetadata(state);
+      state.promptText = "";
+      state.rawBuffer = "";
+      state.turnActivitySeen = false;
+      state.manualTurnPersist = false;
+      if (state.status === "running" || state.status === "waiting_input") {
+        console.log(`[pty] terminal ctrl+c reset agent="${agentName}" ws="${workspaceId}"`);
+        this._scrollback.set(key, "");
+        this._killKey(key);
+        nextPtyProc = this.ensureAgentPty(agentName, workspaceId, { workdir });
+        return nextPtyProc;
+      }
+    } else {
+      this._noteManualInput(key, data);
+    }
+    if (/[\r\n]/.test(data)) {
+      this._markManualRunning(key);
+    }
+    nextPtyProc.write(data);
+    return nextPtyProc;
+  }
+
   _killKey(key) {
     this._rejectPending(key, Object.assign(new Error("PTY killed"), { cancelled: true }));
+    this._clearApprovalRequest(key, { emit: false });
     const ptyProc = this._ptys.get(key);
     if (ptyProc) try { ptyProc.kill(); } catch {}
     this._ptys.delete(key);
+    this._scheduleSnapshotWrite();
     return true;
   }
 
@@ -3430,14 +4676,14 @@ export class PtyService {
   async _writePromptToPty(ptyProc, input, agentType = "codex", { originalPrompt = "" } = {}) {
     try {
       const submittedInput = String(input ?? originalPrompt ?? "");
-      ptyProc.write(input);
+      const writePayload = shouldUseBracketedPaste(agentType, submittedInput)
+        ? `\u001b[200~${formatBracketedPastePayload(agentType, submittedInput)}\u001b[201~`
+        : input;
+      ptyProc.write(writePayload);
       await new Promise((resolve) => setTimeout(resolve, getPromptSubmitDelay(agentType, submittedInput)));
       ptyProc.write("\r");
-      if (
-        ["claude", "gemini"].includes(agentType) &&
-        /\r?\n/u.test(submittedInput)
-      ) {
-        // Claude/Gemini can keep pasted multiline input in the composer until a second Enter confirms send.
+      if (needsComposerConfirm(agentType, submittedInput)) {
+        // Codex/Claude/Gemini can keep pasted multiline input in the composer until a second Enter confirms send.
         await new Promise((resolve) => setTimeout(resolve, getComposerConfirmDelay(agentType, submittedInput)));
         ptyProc.write("\r");
       }
@@ -3482,26 +4728,14 @@ export class PtyService {
       }
       // Forward keyboard input from Terminal tab to the shared PTY
       try {
-        const state = this._ensureState(key, agentName, workspaceId);
-        if (data === "\u0003") {
-          this._resetManualInputState(state);
-          state.promptText = "";
-          state.rawBuffer = "";
-          state.turnActivitySeen = false;
-          state.manualTurnPersist = false;
-        } else {
-          this._noteManualInput(key, data);
-        }
-        if (data === "\u0003" && state.status === "waiting_input") {
-          console.log(`[pty] terminal ctrl+c reset agent="${agentName}" ws="${workspaceId}"`);
-          this._killKey(key);
-          ptyProc = this.ensureAgentPty(agentName, workspaceId, { workdir });
-          return;
-        }
-        if (/[\r\n]/.test(data)) {
-          this._markManualRunning(key);
-        }
-        ptyProc.write(data);
+        ptyProc = this._forwardTerminalInput({
+          key,
+          agentName,
+          workspaceId,
+          workdir,
+          data,
+          ptyProc,
+        }) ?? ptyProc;
       } catch {}
     });
 
@@ -3522,6 +4756,12 @@ export class PtyService {
 export const __testHooks = {
   parseGeminiSessionListOutput,
   sanitizeGeminiTranscript,
+  sanitizeCodexTranscript,
+  codexLooksReadyReturn,
+  choosePreferredTranscript,
+  stripPromptEcho,
+  transcriptLooksContaminatedByPromptEcho,
+  isCodexUpdateSelectionPrompt,
   normalizePersistedAssistantText,
   extractRecordedUserPrompt,
   normalizeSessionPromptText,
@@ -3529,4 +4769,7 @@ export const __testHooks = {
   selectGeminiResumeValue,
   resolveGeminiResumeSession,
   findStreamingChunkBoundary,
+  exactReplyMatchesTarget,
+  formatBracketedPastePayload,
+  recoverExactMultilineReplyFromTranscript,
 };

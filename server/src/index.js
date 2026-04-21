@@ -10,8 +10,12 @@ import { BridgeService } from "./bridge.js";
 import { DiscordAdapter } from "./discord-adapter.js";
 import { FileWatcherService } from "./file-watcher.js";
 import { createHttpServer } from "./http-server.js";
+import { MemoryService } from "./memory-service.js";
+import { MemoryAutomationService } from "./memory-automation-service.js";
 import { SchedulerService } from "./scheduler.js";
 import { PtyService } from "./pty-service.js";
+import { GitService } from "./git-service.js";
+import { SkillManager } from "./skill-manager.js";
 
 const RESTART_EXIT_CODE = 42;
 
@@ -21,6 +25,8 @@ async function main() {
   const store = new Store(db);
   const bus = new EventBus();
   const codex = new CodexAdapter(config);
+  const memoryService = new MemoryService({ rootDir: config.memoryDir });
+  const memoryAutomationService = new MemoryAutomationService({ config, store, memoryService });
   let shutdownPromise = null;
   let restartRequested = false;
   let restartPromise = null;
@@ -29,12 +35,27 @@ async function main() {
   let scheduler = null;
   let server = null;
   let ptyService = null;
+  let gitService = null;
+  let skillManager = null;
 
   const agentRegistry = new AgentRegistry(config);
   // PtyService must be created before AgentBridge so it can be injected
   ptyService = new PtyService({ agentRegistry, config, bus, store });
+  gitService = new GitService({ store, ptyService, bus });
+  skillManager = new SkillManager({ config, store, agentRegistry });
   scheduler = new SchedulerService({ config, bus });
-  const agentBridge = new AgentBridge({ agentRegistry, store, bus, config, ptyService, scheduler });
+  const agentBridge = new AgentBridge({
+    agentRegistry,
+    store,
+    bus,
+    config,
+    ptyService,
+    scheduler,
+    memoryService,
+    memoryAutomationService,
+    gitService,
+    skillManager,
+  });
   const attachments = new AttachmentService(config);
   const bridge = new BridgeService({ store, bus, codex, config, attachments });
   const shutdown = async () => {
@@ -133,6 +154,12 @@ async function main() {
       console.log(
         `[pty] session backfill scanned ${result.candidateCount} workspace-agent pairs, updated ${result.updatedCount}`,
       );
+      const restored = agentBridge?.restoreRuntimeSnapshot?.() ?? null;
+      if (restored && (restored.restoredCount || restored.recoveredCount)) {
+        console.log(
+          `[pty] runtime snapshot restored ${restored.restoredCount} states, recovered ${restored.recoveredCount}`,
+        );
+      }
     } catch (error) {
       console.warn("[pty] session backfill failed:", error?.message || error);
     }

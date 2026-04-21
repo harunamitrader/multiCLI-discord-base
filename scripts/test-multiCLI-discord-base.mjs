@@ -5,14 +5,13 @@
  *   1. Discord コマンドパーサー
  *   2. Store (DB) 操作
  *   3. REST API エンドポイント
- *   4. コスト集計
+ *   4. Canonical Event 正規化
  *
  * 使い方: node --env-file=.env scripts/test-multiCLI-discord-base.mjs
  */
 
 import { createDatabase } from "../server/src/db.js";
 import { Store } from "../server/src/store.js";
-import { calcCost, formatUsage } from "../server/src/pricing.js";
 import { normalizeClaudeEvent, normalizeCodexEvent, normalizeGeminiEvent } from "../server/src/adapters/canonical-events.js";
 import http from "node:http";
 import path from "node:path";
@@ -43,16 +42,26 @@ function section(name) {
 // ── 1. Discord コマンドパーサー ────────────────────────────────────────────
 
 // Inline the parser (copied from discord-adapter.js logic) for testing
+function parseLeadingBangCommand(content) {
+  const trimmed = String(content ?? "").trim();
+  const bangIndex = trimmed.indexOf("!");
+  if (bangIndex <= 0) return null;
+  return {
+    raw: trimmed.slice(0, bangIndex + 1),
+    command: trimmed.slice(0, bangIndex + 1).toLowerCase(),
+    args: trimmed.slice(bangIndex + 1).trim(),
+    trimmed,
+  };
+}
+
 function parseAgentCommand(content, agentNames) {
   const trimmed = content.trim();
-  if (/^stop\?$/i.test(trimmed)) return { agent: null, verb: "stop", prompt: null };
-  if (/^agents?\?$/i.test(trimmed)) return { agent: null, verb: "agents", prompt: null };
-  const wsMatch = trimmed.match(/^workspace\?\s*([\s\S]*)$/i);
-  if (wsMatch) return { agent: null, verb: "workspace", prompt: wsMatch[1].trim() };
-  const costMatch = trimmed.match(/^cost\?\s*(today|week|month|all)?$/i);
-  if (costMatch) return { agent: null, verb: "cost", prompt: (costMatch[1] || "all").toLowerCase() };
+  const bang = parseLeadingBangCommand(trimmed);
+  if (bang?.command === "stop!") return { agent: null, verb: "stop", prompt: null };
+  if (bang?.command === "agents!") return { agent: null, verb: "agents", prompt: null };
+  if (bang?.command === "workspace!") return { agent: null, verb: "workspace", prompt: bang.args };
 
-  const verbMatch = trimmed.match(/^(\S+)\s+(new|stop|reset)\?$/i);
+  const verbMatch = bang?.raw.match(/^(\S+)\s+(new|stop|reset)!$/i);
   if (verbMatch) {
     const name = verbMatch[1].toLowerCase();
     if (agentNames.includes(name)) return { agent: name, verb: verbMatch[2].toLowerCase(), prompt: null };
@@ -70,32 +79,48 @@ section("1. Discord コマンドパーサー");
 const agents = ["hanako", "taro", "jiro"];
 
 {
-  const r = parseAgentCommand("stop?", agents);
-  ok("stop? → verb=stop", r?.verb === "stop" && !r?.agent);
+  const r = parseAgentCommand("stop!", agents);
+  ok("stop! → verb=stop", r?.verb === "stop" && !r?.agent);
 }
 {
-  const r = parseAgentCommand("agents?", agents);
-  ok("agents? → verb=agents", r?.verb === "agents");
+  const r = parseAgentCommand("agents!", agents);
+  ok("agents! → verb=agents", r?.verb === "agents");
 }
 {
-  const r = parseAgentCommand("agent?", agents);
-  ok("agent? → verb=agents", r?.verb === "agents");
+  const r = parseAgentCommand("agent!", agents);
+  ok("agent! → null", r === null);
 }
 {
-  const r = parseAgentCommand("workspace?", agents);
-  ok("workspace? → verb=workspace, prompt=''", r?.verb === "workspace" && r?.prompt === "");
+  const r = parseAgentCommand("workspace!", agents);
+  ok("workspace! → verb=workspace, prompt=''", r?.verb === "workspace" && r?.prompt === "");
 }
 {
-  const r = parseAgentCommand("workspace? my-project", agents);
-  ok("workspace? my-project → prompt=my-project", r?.verb === "workspace" && r?.prompt === "my-project");
+  const r = parseAgentCommand("workspace! my-project", agents);
+  ok("workspace! my-project → prompt=my-project", r?.verb === "workspace" && r?.prompt === "my-project");
 }
 {
-  const r = parseAgentCommand("cost?", agents);
-  ok("cost? → verb=cost, prompt=all", r?.verb === "cost" && r?.prompt === "all");
+  const r = parseLeadingBangCommand("status! extra text");
+  ok("status! extra text → command prefix recognized", r?.command === "status!" && r?.args === "extra text");
 }
 {
-  const r = parseAgentCommand("cost? week", agents);
-  ok("cost? week → prompt=week", r?.verb === "cost" && r?.prompt === "week");
+  const r = parseLeadingBangCommand("new! please");
+  ok("new! please → command prefix recognized", r?.command === "new!" && r?.args === "please");
+}
+{
+  const r = parseLeadingBangCommand("output! gemini");
+  ok("output! gemini → command prefix recognized", r?.command === "output!" && r?.args === "gemini");
+}
+{
+  const r = parseLeadingBangCommand("enter! gemini");
+  ok("enter! gemini → command prefix recognized", r?.command === "enter!" && r?.args === "gemini");
+}
+{
+  const r = parseLeadingBangCommand("approve! gemini");
+  ok("approve! gemini → command prefix recognized", r?.command === "approve!" && r?.args === "gemini");
+}
+{
+  const r = parseLeadingBangCommand("deny! gemini");
+  ok("deny! gemini → command prefix recognized", r?.command === "deny!" && r?.args === "gemini");
 }
 {
   const r = parseAgentCommand("hanako? バグを直して", agents);
@@ -106,12 +131,12 @@ const agents = ["hanako", "taro", "jiro"];
   ok("hanako? (no prompt) → agent=hanako, prompt=''", r?.agent === "hanako" && r?.prompt === "");
 }
 {
-  const r = parseAgentCommand("hanako stop?", agents);
-  ok("hanako stop? → verb=stop", r?.agent === "hanako" && r?.verb === "stop");
+  const r = parseAgentCommand("hanako stop!", agents);
+  ok("hanako stop! → verb=stop", r?.agent === "hanako" && r?.verb === "stop");
 }
 {
-  const r = parseAgentCommand("hanako new?", agents);
-  ok("hanako new? → verb=new", r?.agent === "hanako" && r?.verb === "new");
+  const r = parseAgentCommand("hanako new!", agents);
+  ok("hanako new! → verb=new", r?.agent === "hanako" && r?.verb === "new");
 }
 {
   const r = parseAgentCommand("unknown? hello", agents);
@@ -122,38 +147,9 @@ const agents = ["hanako", "taro", "jiro"];
   ok("normal message → null", r === null);
 }
 
-// ── 2. Pricing / calcCost ──────────────────────────────────────────────────
+// ── 2. Canonical Event Normalizer ──────────────────────────────────────────
 
-section("2. Pricing / コスト計算");
-
-{
-  const cost = calcCost("claude-sonnet-4-6", { inputTokens: 1_000_000, outputTokens: 0 });
-  ok("claude-sonnet-4-6 input 1M → $3.00", Math.abs(cost.usd - 3.00) < 0.001);
-}
-{
-  const cost = calcCost("claude-sonnet-4-6", { inputTokens: 0, outputTokens: 1_000_000 });
-  ok("claude-sonnet-4-6 output 1M → $15.00", Math.abs(cost.usd - 15.00) < 0.001);
-}
-{
-  const cost = calcCost("gemini-2.5-flash", { inputTokens: 1_000_000, outputTokens: 1_000_000 });
-  ok("gemini-2.5-flash 1M+1M = $2.80", Math.abs(cost.usd - 2.80) < 0.001);
-}
-{
-  const cost = calcCost("unknown-model-xyz", { inputTokens: 100, outputTokens: 100 });
-  ok("unknown model → null", cost === null);
-}
-{
-  const str = formatUsage("claude-sonnet-4-6", { inputTokens: 10000, outputTokens: 5000 });
-  ok("formatUsage includes token counts", str.includes("10,000") && str.includes("5,000"));
-}
-{
-  const str = formatUsage("claude-sonnet-4-6", {});
-  ok("formatUsage with empty usage → ''", str === "");
-}
-
-// ── 3. Canonical Event Normalizer ──────────────────────────────────────────
-
-section("3. Canonical Event Normalizer");
+section("2. Canonical Event Normalizer");
 
 {
   const events = normalizeClaudeEvent(
@@ -215,15 +211,27 @@ const store = new Store(db);
 
 {
   // Workspace
-  const ws = store.createWorkspace({ name: "test-ws", workdir: "/tmp/test" });
+  const ws = store.createWorkspace({
+    name: "test-ws",
+    workdir: "/tmp/test",
+    contextInjectionEnabled: false,
+  });
   ok("createWorkspace → id exists", !!ws?.id);
   ok("createWorkspace → name=test-ws", ws?.name === "test-ws");
+  ok("createWorkspace → contextInjectionEnabled=false", ws?.contextInjectionEnabled === false);
+  ok("createWorkspace → first workspace is sidebar-active", ws?.isSidebarActive === true);
+  ok("createWorkspace → first workspace sortOrder=0", ws?.sortOrder === 0);
 
   const got = store.getWorkspaceByName("test-ws");
   ok("getWorkspaceByName", got?.name === "test-ws");
+  ok("getWorkspaceByName → contextInjectionEnabled=false", got?.contextInjectionEnabled === false);
 
-  const updated = store.updateWorkspace(ws.id, { workdir: "/tmp/updated" });
+  const updated = store.updateWorkspace(ws.id, {
+    workdir: "/tmp/updated",
+    contextInjectionEnabled: true,
+  });
   ok("updateWorkspace workdir", updated?.workdir === "/tmp/updated");
+  ok("updateWorkspace contextInjectionEnabled", updated?.contextInjectionEnabled === true);
 
   const list = store.listWorkspaces();
   ok("listWorkspaces ≥ 1", list.length >= 1);
@@ -239,20 +247,21 @@ const storeWorkspaceId = store.getWorkspaceByName("test-ws")?.id;
 }
 
 {
-  // Run + cost
+  // Run completion
   const run = store.startRun({ agentName: "hanako", workspaceId: storeWorkspaceId, prompt: "hello", source: "test" });
   ok("startRun → id exists", !!run?.id);
   ok("startRun → status=running", run?.status === "running");
 
   const completed = store.completeRun(run.id, {
     status: "completed",
-    inputTokens: 1000,
-    outputTokens: 500,
-    costUsd: 0.0105,
   });
   ok("completeRun → status=completed", completed?.status === "completed");
-  ok("completeRun → inputTokens=1000", completed?.inputTokens === 1000);
-  ok("completeRun → costUsd≈0.0105", Math.abs(completed?.costUsd - 0.0105) < 0.0001);
+}
+
+{
+  const run = store.startRun({ agentName: "hanako", workspaceId: storeWorkspaceId, prompt: "recover", source: "test" });
+  const recovered = store.recoverRun(run.id, "interrupted");
+  ok("recoverRun → status=interrupted", recovered?.status === "interrupted");
 }
 
 {
@@ -262,14 +271,6 @@ const storeWorkspaceId = store.getWorkspaceByName("test-ws")?.id;
   const msgs = store.listMessages("hanako", storeWorkspaceId, 10);
   ok("addMessage + listMessages → 2 messages", msgs.length === 2);
   ok("listMessages → user first", msgs[0]?.role === "user");
-}
-
-{
-  // Cost summary
-  const summary = store.getCostSummary({ agentName: "hanako", workspaceId: storeWorkspaceId });
-  ok("getCostSummary → 1 row", summary.length === 1);
-  ok("getCostSummary → totalInputTokens=1000", summary[0]?.totalInputTokens === 1000);
-  ok("getCostSummary → totalCostUsd≈0.0105", Math.abs(summary[0]?.totalCostUsd - 0.0105) < 0.0001);
 }
 
 {
@@ -303,6 +304,25 @@ function post(url, data) {
     const req = http.request({
       hostname: opts.hostname, port: opts.port, path: opts.pathname + opts.search,
       method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+    }, (res) => {
+      let body = "";
+      res.on("data", (d) => (body += d));
+      res.on("end", () => resolve({ status: res.statusCode, body, json: () => JSON.parse(body) }));
+    });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+function patch(url, data) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(data);
+    const opts = new URL(url);
+    const req = http.request({
+      hostname: opts.hostname, port: opts.port, path: opts.pathname + opts.search,
+      method: "PATCH",
       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
     }, (res) => {
       let body = "";
@@ -394,11 +414,22 @@ if (serverReady) {
     const parentAgent = liveAgentList[0]?.name;
     const r = await post(
       `${BASE}/api/workspaces`,
-      parentAgent ? { name: "test-api-ws", parentAgent } : { name: "test-api-ws" }
+      parentAgent
+        ? { name: "test-api-ws", parentAgent, contextInjectionMode: "off" }
+        : { name: "test-api-ws", contextInjectionMode: "off" }
     );
     ok("POST /api/workspaces → 201", r.status === 201);
     newWsId = r.json()?.id;
     ok("POST /api/workspaces → id exists", !!newWsId);
+    ok("POST /api/workspaces → contextInjectionEnabled=false", r.json()?.contextInjectionEnabled === false);
+  }
+
+  {
+    const r = await patch(`${BASE}/api/workspaces/${newWsId}`, {
+      contextInjectionMode: "default",
+    });
+    ok("PATCH /api/workspaces/:id → 200", r.status === 200);
+    ok("PATCH /api/workspaces/:id → contextInjectionEnabled=null", r.json()?.contextInjectionEnabled === null);
   }
 
   // Activate workspace
@@ -424,13 +455,6 @@ if (serverReady) {
     });
     ok("PATCH /api/app-settings → 200", r.status === 200);
     ok("PATCH /api/app-settings → defaultWorkdir saved", r.json()?.defaultWorkdir === process.cwd());
-  }
-
-  // Cost summary
-  {
-    const r = await get(`${BASE}/api/cost?period=all`);
-    ok("GET /api/cost → 200", r.status === 200);
-    ok("GET /api/cost → array", Array.isArray(r.json()));
   }
 
   // xterm static files

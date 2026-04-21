@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "targetDirs": {
+    "claude": [".claude\\skills"],
+    "gemini": [".gemini\\skills"],
+    "copilot": [".github\\copilot\\skills"],
+    "codex": [".codex\\skills"]
+  },
+  "skills": [
+    {
+      "id": "workspace-overview",
+      "title": "Workspace overview",
+      "targets": ["claude", "gemini", "copilot", "codex"],
+      "source": "workspace-overview.md"
+    },
+    {
+      "id": "shared-pty-routing",
+      "title": "Shared PTY routing",
+      "targets": ["claude", "gemini", "copilot", "codex"],
+      "source": "shared-pty-routing.md"
+    }
+  ]
+}

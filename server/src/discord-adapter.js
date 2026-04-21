@@ -54,18 +54,163 @@ function formatWorkspaceStatusMessage(workspace, agentName) {
   ].join("\n");
 }
 
+function formatRelativeTimeLabel(timestamp) {
+  if (timestamp === null || timestamp === undefined || timestamp === "") {
+    return "never";
+  }
+  const atMs =
+    typeof timestamp === "number"
+      ? timestamp
+      : new Date(timestamp).getTime();
+  if (!Number.isFinite(atMs)) {
+    return "unknown";
+  }
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - atMs) / 1000));
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds}s ago`;
+  }
+  if (elapsedSeconds < 3600) {
+    return `${Math.floor(elapsedSeconds / 60)}m ago`;
+  }
+  if (elapsedSeconds < 86400) {
+    return `${Math.floor(elapsedSeconds / 3600)}h ago`;
+  }
+  return `${Math.floor(elapsedSeconds / 86400)}d ago`;
+}
+
+function formatAgentRuntimeStatusLine({
+  agentName,
+  isParent = false,
+  isDefault = false,
+  terminalState = {},
+  queuedCount = 0,
+}) {
+  const roleLabels = [];
+  if (isParent) roleLabels.push("parent");
+  if (isDefault) roleLabels.push("default");
+  const header = roleLabels.length > 0
+    ? `${agentName} [${roleLabels.join(", ")}]`
+    : agentName;
+  const parts = [
+    `status=${terminalState.status || "idle"}`,
+    `pty=${terminalState.hasProcess ? "on" : "off"}`,
+  ];
+  if (terminalState.status !== "waiting_input") {
+    parts.push(`ready=${terminalState.readyForPrompt ? "yes" : "no"}`);
+  }
+  if (queuedCount > 0) {
+    parts.push(`queue=${queuedCount}`);
+  }
+  if (terminalState.manualInputDirty) {
+    parts.push("draft=yes");
+  }
+  if (terminalState.approvalRequest?.status === "pending") {
+    parts.push("approval=pending");
+  }
+  if (terminalState.quotaNotice?.summary) {
+    parts.push("quota=wait");
+  }
+  if (terminalState.configStale) {
+    parts.push("config=stale");
+  }
+  if (terminalState.warningCode && terminalState.warningCode !== "quota_wait") {
+    parts.push(`warning=${terminalState.warningCode}`);
+  }
+  if (terminalState.lastOutputAt) {
+    parts.push(`last=${formatRelativeTimeLabel(terminalState.lastOutputAt)}`);
+  }
+  return `- ${header} :: ${parts.join(" | ")}`;
+}
+
+function formatWorkspaceRuntimeStatusMessage({
+  workspace,
+  defaultAgent,
+  agentStatuses = [],
+  focusedAgentName = "",
+}) {
+  const lines = [
+    `Workspace: ${workspace?.name || "unknown"}`,
+    `Workspace ID: ${workspace?.id || "unknown"}`,
+    `Default agent: ${defaultAgent || "unassigned"}`,
+  ];
+  if (focusedAgentName) {
+    lines.push(`Filter: ${focusedAgentName}`);
+  }
+  lines.push("", "Agents:");
+  if (agentStatuses.length === 0) {
+    lines.push("（agent status はまだありません）");
+  } else {
+    lines.push(...agentStatuses);
+  }
+  return lines.join("\n");
+}
+
+function formatQuotedBlock(text) {
+  const normalized = String(text || "").replace(/\r/g, "").trim();
+  if (!normalized) {
+    return "> (no output)";
+  }
+  return normalized
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+}
+
+function formatTerminalOutputMessage({
+  workspace,
+  agentName,
+  output,
+}) {
+  const lines = [
+    `Latest PTY output: ${agentName}`,
+    `Workspace: ${workspace?.name || "unknown"} (${workspace?.id || "unknown"})`,
+    `Status: ${output.status || "idle"}`,
+  ];
+  if (output.truncated) {
+    lines.push(`Showing last ${output.lineLimit} of ${output.totalLineCount} line(s)`);
+  }
+  lines.push("", formatQuotedBlock(output.text));
+  return lines.join("\n");
+}
+
 function formatDiscordHelpText() {
   return [
     "multiCLI-discord-base commands:",
-    "!help - このヘルプを表示",
-    "!new - このチャンネル名で新しい workspace を作成して紐づけ",
-    "!status - 現在の workspace 紐づけと agent を表示",
-    "workspace? <名前> - 既存 workspace に紐づけ、なければ新規作成",
-    "agents? - 利用可能 agent を表示",
-    "stop? - 進行中 agent を停止",
+    "help! - このヘルプを表示",
+    "new! - このチャンネル名で新しい workspace を作成して紐づけ",
+    "status! [agent] - workspace と PTY 状態を表示",
+    "output! [agent] - 最新 PTY 出力を再掲",
+    "enter! [agent] - shared PTY に Enter を送信",
+    "approve! [agent] - 承認待ちに approve を送信",
+    "deny! [agent] - 承認待ちに deny を送信",
+    "bindings! - workspace の resume binding 一覧を表示",
+    "resume! [agent] - 保存済み session ref で resume を試行",
+    "restart! [agent] - shared PTY を再起動",
+    "checkpoints! - checkpoint 一覧を表示",
+    "checkpoints! create [label] - checkpoint を作成",
+    "rollback! preview <checkpointId> - rollback preview を表示",
+    "rollback! apply <checkpointId> - checkpoint へ rollback",
+    "skills! [agent] - skill sync plan を表示",
+    "skills! apply [agent] - skill sync を適用",
+    "workspace! <名前> - 既存 workspace に紐づけ、なければ新規作成",
+    "agents! - 利用可能 agent を表示",
+    "stop! - 進行中 agent を停止",
     "agentName? <prompt> - 指定 agent に送信",
+    "/command - CLI の / コマンドを shared PTY にそのまま送信",
     "<prompt> - 紐づけ済み workspace の parent agent に送信",
   ].join("\n");
+}
+
+function parseLeadingBangCommand(content) {
+  const trimmed = String(content ?? "").trim();
+  const bangIndex = trimmed.indexOf("!");
+  if (bangIndex <= 0) return null;
+  return {
+    raw: trimmed.slice(0, bangIndex + 1),
+    command: trimmed.slice(0, bangIndex + 1).toLowerCase(),
+    args: trimmed.slice(bangIndex + 1).trim(),
+    trimmed,
+  };
 }
 
 function getChannelDisplayName(channel) {
@@ -89,7 +234,11 @@ function formatWorkingStatusContent(startedAt, label = "Working") {
 }
 
 function formatFinishedStatusContent(status, startedAt) {
-  const label = status[0].toUpperCase() + status.slice(1);
+  const labelMap = {
+    quota_wait: "Quota wait",
+    waiting_input: "Waiting input",
+  };
+  const label = labelMap[status] || (status[0].toUpperCase() + status.slice(1));
   return `> ${label} (${formatElapsedLabel(startedAt)})`;
 }
 
@@ -154,15 +303,40 @@ function formatAttachmentSummaryLines(attachments = []) {
   });
 }
 
+function isSlashPassthroughInput(text) {
+  const normalized = String(text ?? "").trim();
+  return normalized.startsWith("/") && !/[\r\n]/u.test(normalized);
+}
+
+function formatInputMetadataLines(metadata) {
+  const lines = [];
+  const normalized = metadata && typeof metadata === "object" ? metadata : null;
+  if (!normalized) return lines;
+  if (normalized.inputMode === "slash_command") {
+    lines.push("Mode: / passthrough");
+  }
+  if (normalized.context?.used) {
+    const count = Number(normalized.context.messageCount || 0);
+    const chars = Number(normalized.context.totalChars || 0);
+    lines.push(`Context: attached (${count} message(s), ${chars} chars)`);
+  }
+  return lines;
+}
+
 function formatLocalInputMessage(payload) {
   const lines = [];
   const text = String(payload.text || "").trim();
   const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  const metaLines = formatInputMetadataLines(payload.metadata);
 
   if (text) {
     lines.push("Local input:", `>>> ${text}`);
   } else {
     lines.push("Local input with attachments:");
+  }
+
+  if (metaLines.length > 0) {
+    lines.push("", ...metaLines);
   }
 
   if (attachments.length > 0) {
@@ -184,14 +358,35 @@ function formatScheduledInputMessage(payload) {
   return lines.join("\n");
 }
 
-function formatWorkspaceBulletList(workspaces = []) {
+function formatWorkspaceBulletList(workspaces = [], { maxItems = 10, maxChars = 1200 } = {}) {
   const normalized = Array.isArray(workspaces) ? workspaces : [];
   if (normalized.length === 0) {
     return "（ワークスペースはまだありません）";
   }
-  return normalized
-    .map((workspace) => `• ${workspace.name}${workspace.isActive ? " ✓" : ""}${workspace.id ? ` (\`${workspace.id}\`)` : ""}`)
-    .join("\n");
+
+  const lines = [];
+  let visibleCount = 0;
+  for (const workspace of normalized) {
+    if (visibleCount >= maxItems) {
+      break;
+    }
+    const line =
+      `• ${workspace.name}${workspace.isActive ? " ✓" : ""}` +
+      `${workspace.id ? ` (\`${workspace.id}\`)` : ""}`;
+    const nextText = [...lines, line].join("\n");
+    if (nextText.length > maxChars) {
+      break;
+    }
+    lines.push(line);
+    visibleCount += 1;
+  }
+
+  const remainingCount = normalized.length - visibleCount;
+  if (remainingCount > 0) {
+    lines.push(`• …ほか ${remainingCount} 件`);
+  }
+
+  return lines.join("\n");
 }
 
 function buildPromptWithAttachmentPaths(text, attachments = []) {
@@ -227,31 +422,29 @@ function buildPromptWithAttachmentPaths(text, attachments = []) {
 }
 
 /**
- * Parse a "?" agent command from Discord message content.
+ * Parse a Discord command from message content.
  *
  * Patterns:
  *   "hanako? <prompt>"  → { agent: "hanako", verb: null,      prompt: "<prompt>" }
  *   "hanako?"           → { agent: "hanako", verb: null,      prompt: "" }
- *   "hanako new?"       → { agent: "hanako", verb: "new",     prompt: null }
- *   "hanako stop?"      → { agent: "hanako", verb: "stop",    prompt: null }
- *   "stop?"             → { agent: null,     verb: "stop",    prompt: null }
- *   "agents?"           → { agent: null,     verb: "agents",  prompt: null }
+ *   "hanako new!"       → { agent: "hanako", verb: "new",     prompt: null }
+ *   "hanako stop!"      → { agent: "hanako", verb: "stop",    prompt: null }
+ *   "stop!"             → { agent: null,     verb: "stop",    prompt: null }
+ *   "agents!"           → { agent: null,     verb: "agents",  prompt: null }
  *
  * Returns null if no pattern matches.
  */
 function parseAgentCommand(content, agentNames) {
   const trimmed = content.trim();
+  const bang = parseLeadingBangCommand(trimmed);
 
-  // Global commands: "stop?" / "agents?" / "workspace?" / "cost?"
-  if (/^stop\?$/i.test(trimmed)) return { agent: null, verb: "stop", prompt: null };
-  if (/^agents?\?$/i.test(trimmed)) return { agent: null, verb: "agents", prompt: null };
-  const wsMatch = trimmed.match(/^workspace\?\s*([\s\S]*)$/i);
-  if (wsMatch) return { agent: null, verb: "workspace", prompt: wsMatch[1].trim() };
-  const costMatch = trimmed.match(/^cost\?\s*(today|week|month|all)?$/i);
-  if (costMatch) return { agent: null, verb: "cost", prompt: (costMatch[1] || "all").toLowerCase() };
+  // Global commands: "stop!" / "agents!" / "workspace!"
+  if (bang?.command === "stop!") return { agent: null, verb: "stop", prompt: null };
+  if (bang?.command === "agents!") return { agent: null, verb: "agents", prompt: null };
+  if (bang?.command === "workspace!") return { agent: null, verb: "workspace", prompt: bang.args };
 
-  // "hanako new?" / "hanako stop?" — verb before ?
-  const verbMatch = trimmed.match(/^(\S+)\s+(new|stop|reset)\?$/i);
+  // "hanako new!" / "hanako stop!" — verb before !
+  const verbMatch = bang?.raw.match(/^(\S+)\s+(new|stop|reset)!$/i);
   if (verbMatch) {
     const name = verbMatch[1].toLowerCase();
     if (agentNames.includes(name)) {
@@ -392,6 +585,30 @@ export class DiscordAdapter {
       }),
     );
 
+    this.unsubscribers.push(
+      this.bus.on("observer.notice", (event) => {
+        this.handleWorkspaceObserverNotice(event).catch((error) => {
+          console.error("Discord workspace observer notice failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("approval.requested", (event) => {
+        this.handleWorkspaceApprovalEvent("requested", event).catch((error) => {
+          console.error("Discord workspace approval notice failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("approval.expired", (event) => {
+        this.handleWorkspaceApprovalEvent("expired", event).catch((error) => {
+          console.error("Discord workspace approval expiry failed:", error);
+        });
+      }),
+    );
+
     await this.client.login(this.config.discordBotToken);
   }
 
@@ -440,6 +657,12 @@ export class DiscordAdapter {
       });
     this.workspacePromptQueues.set(key, entry);
     return { turnsAhead, promise: entry.tail };
+  }
+
+  getWorkspaceQueuedTurns(workspaceId, agentName) {
+    const key = this.getWorkspacePromptQueueKey(workspaceId, agentName);
+    const pendingCount = Number(this.workspacePromptQueues.get(key)?.pendingCount ?? 0);
+    return Math.max(0, pendingCount - 1);
   }
 
   isAllowedTarget(guildId, channelId) {
@@ -820,6 +1043,25 @@ export class DiscordAdapter {
     return this.agentBridge.store.listDiscordBindingsByWorkspace(normalizedWorkspaceId)[0] ?? null;
   }
 
+  async sendWorkspaceChannelNotice(workspaceId, content) {
+    if (!this.client || !workspaceId || !content) {
+      return;
+    }
+    const binding = this.getWorkspaceDiscordBinding(workspaceId);
+    if (!binding?.discordChannelId) {
+      return;
+    }
+    const channel = await this.client.channels.fetch(binding.discordChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+    for (const chunk of splitMessage(String(content || "").trim(), 1800)) {
+      if (!chunk) continue;
+      await channel.send(chunk).catch(() => null);
+    }
+    this.markWorkspaceProgressTrackerHasTrailingMessages(workspaceId);
+  }
+
   stopWorkspaceProgressTracker(workspaceId) {
     const tracker = this.workspaceProgressTrackers.get(workspaceId);
     if (!tracker) {
@@ -944,7 +1186,7 @@ export class DiscordAdapter {
   }
 
   async handleWorkspaceMessageUser(event) {
-    if (!this.client || !event?.workspaceId || event.source === "discord") {
+    if (!this.client || !event?.workspaceId || ["discord", "discord-slash"].includes(event.source)) {
       return;
     }
     const binding = this.getWorkspaceDiscordBinding(event.workspaceId);
@@ -960,7 +1202,7 @@ export class DiscordAdapter {
       this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
       return;
     }
-    await channel.send(formatLocalInputMessage({ text: event.content })).catch(() => null);
+    await channel.send(formatLocalInputMessage({ text: event.content, metadata: event.metadata })).catch(() => null);
     this.markWorkspaceProgressTrackerHasTrailingMessages(event.workspaceId);
   }
 
@@ -1003,7 +1245,7 @@ export class DiscordAdapter {
       await this.startWorkspaceProgressTracker(event.workspaceId, event.agentName, event.createdAt);
       return;
     }
-    if (["waiting_input", "error"].includes(event.status)) {
+    if (["waiting_input", "quota_wait", "error"].includes(event.status)) {
       await this.finishWorkspaceProgressTracker(event.workspaceId, event.status, event.createdAt);
     }
   }
@@ -1025,6 +1267,35 @@ export class DiscordAdapter {
     await this.finishWorkspaceProgressTracker(event.workspaceId, "error", event.createdAt);
   }
 
+  async handleWorkspaceObserverNotice(event) {
+    if (!event?.workspaceId || !this.config.discordStatusUpdates) {
+      return;
+    }
+    await this.sendWorkspaceChannelNotice(event.workspaceId, `ℹ️ ${event.message}`);
+  }
+
+  async handleWorkspaceApprovalEvent(kind, event) {
+    if (!event?.workspaceId || !this.config.discordStatusUpdates) {
+      return;
+    }
+    const approval = event.approval ?? {};
+    const agentName = event.agentName || "agent";
+    if (kind === "requested") {
+      const summary = approval.summary || "承認待ちが発生しました。";
+      await this.sendWorkspaceChannelNotice(
+        event.workspaceId,
+        `🛂 ${agentName} が承認待ちです。\n${summary}\n\`approve! ${agentName}\` / \`deny! ${agentName}\` で応答できます。`,
+      );
+      return;
+    }
+    if (kind === "expired") {
+      await this.sendWorkspaceChannelNotice(
+        event.workspaceId,
+        `⌛ ${agentName} の承認待ちが期限切れになりました。必要なら Terminal で状態を確認してください。`,
+      );
+    }
+  }
+
   async handleInteraction(interaction) {
     if (!interaction.isChatInputCommand()) {
       return;
@@ -1035,12 +1306,12 @@ export class DiscordAdapter {
         content: "This command is not allowed in this channel.",
         ephemeral: true,
       });
-      return;
+        return;
     }
 
     await interaction.reply({
       content:
-        "Slash commands は廃止されました。`!new`、`workspace? <名前>`、`agents?`、`stop?`、`agentName? <prompt>` を使ってください。",
+        "Slash commands は廃止されました。`new!`、`workspace! <名前>`、`agents!`、`stop!`、`agentName? <prompt>` を使ってください。",
       ephemeral: true,
     }).catch(() => null);
   }
@@ -1416,7 +1687,7 @@ export class DiscordAdapter {
     if (invalidBinding) {
       await message.reply(
         `⚠️ このチャンネルは削除済みワークスペース \`${binding?.workspaceId}\` に紐づいています。\n` +
-        `\`workspace? <名前>\` で再設定してください。\n\n` +
+        `\`workspace! <名前>\` で再設定してください。\n\n` +
         `**利用可能なワークスペース:**\n${workspaceList}`
       );
       return;
@@ -1425,10 +1696,61 @@ export class DiscordAdapter {
       "⚠️ このチャンネルはまだ workspace に紐づいていません。\n" +
       "既存 workspace に接続するか、新しく作成してください。\n\n" +
       "**使い方:**\n" +
-      "- `workspace? <名前>` : 既存 workspace に紐づけ、なければ新規作成\n" +
-      "- `!new` : このチャンネル名で新しい workspace を作成して紐づけ\n\n" +
+      "- `workspace! <名前>` : 既存 workspace に紐づけ、なければ新規作成\n" +
+      "- `new!` : このチャンネル名で新しい workspace を作成して紐づけ\n\n" +
       `**利用可能なワークスペース:**\n${workspaceList}`
     );
+  }
+
+  async resolveDiscordRemoteOpTarget(message, requestedAgentName = "", commandName = "status!") {
+    const normalizedRequestedAgentName = String(requestedAgentName || "").trim().toLowerCase();
+    const context = this.resolveDiscordWorkspaceContext(
+      message.channelId,
+      normalizedRequestedAgentName || null,
+    );
+    if (!context.binding || context.invalidBinding || !context.workspaceId) {
+      await this.replyWorkspaceBindingRequired(message, context);
+      return null;
+    }
+
+    const workspace = this.agentBridge?.getWorkspace?.(context.workspaceId) ?? null;
+    const workspaceAgents = this.agentBridge?.listWorkspaceAgents?.(context.workspaceId) ?? [];
+    const candidateAgentName = context.agentName || null;
+    if (!candidateAgentName) {
+      const candidates =
+        workspaceAgents.map((entry) => entry.agentName).join(", ") ||
+        (this.agentRegistry?.names?.() ?? []).join(", ");
+      await message.reply(
+        `操作対象の agent を特定できません。 \`${commandName} <agent>\` のように指定してください。` +
+        (candidates ? ` 候補: ${candidates}` : "")
+      );
+      return null;
+    }
+
+    if (
+      normalizedRequestedAgentName &&
+      workspaceAgents.length > 0 &&
+      !workspaceAgents.some((entry) => entry.agentName === candidateAgentName)
+    ) {
+      await message.reply(
+        `エージェント \`${candidateAgentName}\` は workspace \`${workspace?.name || context.workspaceId}\` に参加していません。`
+      );
+      return null;
+    }
+
+    const agent = this.agentRegistry?.get?.(candidateAgentName) ?? null;
+    if (!agent) {
+      await message.reply(`エージェント \`${candidateAgentName}\` が見つかりません。`);
+      return null;
+    }
+
+    return {
+      ...context,
+      agentName: candidateAgentName,
+      agent,
+      workspace,
+      workspaceAgents,
+    };
   }
 
   resolveDiscordWorkspaceCreateAgent() {
@@ -1480,7 +1802,7 @@ export class DiscordAdapter {
         const agentList = registry?.list?.().map((item) => item.name).join(", ") || "なし";
         await reply(
           `複数エージェント構成のため、workspace 作成時の parentAgent を自動決定できません。\n` +
-          `\`workspace? <名前>\` を使ってください。候補 agent: ${agentList}`
+          `\`workspace! <名前>\` を使ってください。候補 agent: ${agentList}`
         );
         return null;
       }
@@ -1649,11 +1971,9 @@ export class DiscordAdapter {
           }
 
           const elapsed = Math.round((Date.now() - startedAt) / 1000);
-          const { formatUsage } = await import("./pricing.js");
-          const usageLine = formatUsage(agent.model || agent.adapter?.defaultModel || "", result.usage);
           await enqueueProgressTask(async () => {
             await sendSyncedText(result.text);
-            await finishProgress(`> ✅ ${agentName} 完了 (${elapsed}s)${usageLine ? `\n> 📊 ${usageLine}` : ""}`);
+            await finishProgress(`> ✅ ${agentName} 完了 (${elapsed}s)`);
           });
           await message.react("\u2611").catch(() => null);
         } catch (err) {
@@ -1691,7 +2011,7 @@ export class DiscordAdapter {
       return null;
     };
 
-    // Global: "workspace?" — show or set channel↔workspace binding
+    // Global: "workspace!" — show or set channel↔workspace binding
     if (!agentName && verb === "workspace") {
       if (!ab) {
         await message.reply("AgentBridge が利用できません。");
@@ -1710,12 +2030,12 @@ export class DiscordAdapter {
         const agentHint = binding?.defaultAgent ? ` (デフォルトエージェント: ${binding.defaultAgent})` : "";
         const workspaces = formatWorkspaceBulletList(ab.listWorkspaces());
         const invalidHint = context.invalidBinding
-          ? "\n\n⚠️ この紐づけ先は削除済みです。`workspace? <名前>` で再設定してください。"
+          ? "\n\n⚠️ この紐づけ先は削除済みです。`workspace! <名前>` で再設定してください。"
           : "";
         await message.reply(
           `**このチャンネルのワークスペース:** ${wsName}${agentHint}\n\n` +
           `**利用可能なワークスペース:**\n${workspaces}\n\n` +
-          `変更するには: \`workspace? <名前>\`${invalidHint}`
+          `変更するには: \`workspace! <名前>\`${invalidHint}`
         );
         return;
       }
@@ -1751,33 +2071,14 @@ export class DiscordAdapter {
       return;
     }
 
-    // Global: "cost?" / "cost? today|week|month|all"
-    if (!agentName && verb === "cost") {
-      const period = prompt || "all";
-      if (!ab) { await message.reply("AgentBridge が利用できません。"); return; }
-      const rows = ab.getCostSummary({ period });
-      if (rows.length === 0) {
-        await message.reply(`📊 コスト記録なし（期間: ${period}）`);
-        return;
-      }
-      const periodLabel = { today: "今日", week: "過去7日", month: "過去30日", all: "累計" }[period] || period;
-      const lines = rows.map((r) =>
-        `• **${r.agentName}**: ${r.runCount}回 / in ${r.totalInputTokens.toLocaleString()} + out ${r.totalOutputTokens.toLocaleString()} tokens / **¥${r.totalCostJpy} ($${r.totalCostUsd.toFixed(4)})**`
-      );
-      const total = rows.reduce((s, r) => ({ usd: s.usd + r.totalCostUsd, jpy: s.jpy + r.totalCostJpy }), { usd: 0, jpy: 0 });
-      lines.push(`\n合計: **¥${total.jpy.toFixed(1)} ($${total.usd.toFixed(4)})**`);
-      await message.reply(`📊 **コストサマリー（${periodLabel}）**\n${lines.join("\n")}`);
-      return;
-    }
-
-    // Global: "stop?" — stop all agents
+    // Global: "stop!" — stop all agents
     if (!agentName && verb === "stop") {
       ab ? ab.stopAll() : registry.stopAll();
       await message.reply("⏹ 全エージェントを停止しました。");
       return;
     }
 
-    // Global: "agents?" — list all agents
+    // Global: "agents!" — list all agents
     if (!agentName && verb === "agents") {
       await message.reply(registry.formatList());
       return;
@@ -1789,7 +2090,7 @@ export class DiscordAdapter {
       return;
     }
 
-    // "hanako stop?" — stop agent
+    // "hanako stop!" — stop agent
     if (verb === "stop") {
       const context = await ensureValidWorkspaceContext(agentName);
       if (!context) return;
@@ -1799,7 +2100,7 @@ export class DiscordAdapter {
       return;
     }
 
-    // "hanako new?" / "hanako reset?" — reset session
+    // "hanako new!" / "hanako reset!" — reset session
     if (verb === "new" || verb === "reset") {
       const context = await ensureValidWorkspaceContext(agentName);
       if (!context) return;
@@ -1831,6 +2132,19 @@ export class DiscordAdapter {
     if (!context) return;
     const { workspaceId } = context;
 
+    if (isSlashPassthroughInput(prompt)) {
+      try {
+        await this.agentBridge.sendRemoteCommand(agentName, workspaceId, prompt, {
+          source: "discord-slash",
+        });
+        await message.react("☑").catch(() => null);
+        await message.reply(`↪ ${agentName} に \`${prompt}\` を送信しました。結果は shared PTY / Chat / Discord に流れます。`);
+      } catch (error) {
+        await message.reply(`⚠️ ${agentName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+
     await this.runDiscordAgentPrompt({ message, agentName, workspaceId, prompt, rawAttachments });
   }
 
@@ -1858,7 +2172,311 @@ export class DiscordAdapter {
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    if (content === "!status") {
+    const bangCommand = parseLeadingBangCommand(content);
+
+    if (bangCommand?.command === "output!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("output! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(message, bangCommand.args, "output!");
+      if (!target) {
+        return;
+      }
+      const output = this.agentBridge.getAgentTerminalOutput?.(target.agentName, target.workspaceId, {
+        lineLimit: 50,
+      }) ?? { text: "", status: "idle", totalLineCount: 0, lineLimit: 50, truncated: false };
+      if (!output.text) {
+        await message.reply(
+          `ℹ️ ${target.agentName} の PTY 出力はまだありません。status=${output.status || "idle"}`
+        );
+        return;
+      }
+      const chunks = splitMessage(
+        formatTerminalOutputMessage({
+          workspace: target.workspace,
+          agentName: target.agentName,
+          output,
+        }),
+        1800,
+      );
+      await message.reply(chunks[0]);
+      for (const chunk of chunks.slice(1)) {
+        await message.channel.send(chunk).catch(() => null);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "enter!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("enter! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(message, bangCommand.args, "enter!");
+      if (!target) {
+        return;
+      }
+      const result = this.agentBridge.sendTerminalInput?.(
+        target.agentName,
+        target.workspaceId,
+        "\r",
+        { workdir: target.workspace?.workdir },
+      ) ?? { ok: false, reason: "unavailable" };
+      if (!result.ok) {
+        const detail =
+          result.reason === "not_started"
+            ? "PTY がまだ起動していません。Terminal タブを開くか prompt を送って開始してください。"
+            : "Enter を送信できませんでした。";
+        await message.reply(`⚠️ ${target.agentName}: ${detail}`);
+        return;
+      }
+      await message.reply(`↵ ${target.agentName} に Enter を送信しました。`);
+      return;
+    }
+
+    if (bangCommand?.command === "approve!" || bangCommand?.command === "deny!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply(`${bangCommand.command} は PTY-first workspace でのみ利用できます。`);
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(
+        message,
+        bangCommand.args,
+        bangCommand.command,
+      );
+      if (!target) {
+        return;
+      }
+      const result = this.agentBridge.respondToApproval?.(
+        target.agentName,
+        target.workspaceId,
+        bangCommand.command === "approve!" ? "approve" : "deny",
+        { workdir: target.workspace?.workdir },
+      ) ?? { ok: false, reason: "unavailable" };
+      if (!result.ok) {
+        const detail =
+          result.reason === "approval_not_pending"
+            ? "現在 pending の承認待ちはありません。"
+            : result.reason === "not_started"
+              ? "PTY が起動していません。Terminal を開いて状態を確認してください。"
+              : "承認応答を送信できませんでした。";
+        await message.reply(`⚠️ ${target.agentName}: ${detail}`);
+        return;
+      }
+      await message.reply(
+        bangCommand.command === "approve!"
+          ? `✅ ${target.agentName} に approve を送信しました。`
+          : `🛑 ${target.agentName} に deny を送信しました。`,
+      );
+      return;
+    }
+
+    if (bangCommand?.command === "bindings!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("bindings! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const bindings = this.agentBridge.listResumeBindings?.(context.workspaceId) ?? [];
+      const lines = [
+        `Workspace: ${this.agentBridge.getWorkspace?.(context.workspaceId)?.name || context.workspaceId}`,
+        `Workspace ID: ${context.workspaceId}`,
+        "",
+        ...(bindings.length > 0
+          ? bindings.map((entry) => `- ${entry.agentName} :: ${entry.providerSessionRef || "none"} :: ${entry.bindingStatus || "unknown"}`)
+          : ["- binding はまだありません。"]),
+      ];
+      const chunks = splitMessage(lines.join("\n"), 1800);
+      await message.reply(chunks[0]);
+      for (const chunk of chunks.slice(1)) {
+        await message.channel.send(chunk).catch(() => null);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "resume!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("resume! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(message, bangCommand.args, "resume!");
+      if (!target) {
+        return;
+      }
+      try {
+        const result = await this.agentBridge.resumeAgentSession?.(target.agentName, target.workspaceId, {
+          workdir: target.workspace?.workdir,
+          waitForReadyMs: 4000,
+        });
+        await message.reply(
+          result?.resumed
+            ? `♻️ ${target.agentName} を resume しました。status=${result.terminalState?.status || "unknown"}`
+            : `ℹ️ ${target.agentName} は resume できませんでした。`
+        );
+      } catch (err) {
+        await message.reply(`⚠️ ${target.agentName}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "restart!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("restart! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(message, bangCommand.args, "restart!");
+      if (!target) {
+        return;
+      }
+      try {
+        const result = await this.agentBridge.restartAgent?.(target.agentName, target.workspaceId, {
+          workdir: target.workspace?.workdir,
+          waitForReadyMs: 4000,
+          force: false,
+          requestedBy: "Discord",
+          source: "discord",
+        });
+        await message.reply(
+          `🔁 ${target.agentName} を再起動しました。status=${result?.terminalState?.status || result?.status || "unknown"}`
+        );
+      } catch (err) {
+        await message.reply(`⚠️ ${target.agentName}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "checkpoints!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("checkpoints! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const args = String(bangCommand.args || "").trim();
+      if (args.toLowerCase().startsWith("create")) {
+        const label = args.slice("create".length).trim();
+        try {
+          const checkpoint = this.agentBridge.createWorkspaceCheckpoint?.(context.workspaceId, {
+            label,
+            kind: "manual",
+            requestedBy: "Discord",
+            source: "discord",
+          });
+          await message.reply(`📸 checkpoint を作成しました: \`${checkpoint?.id || "unknown"}\`${label ? ` (${label})` : ""}`);
+        } catch (err) {
+          await message.reply(`⚠️ checkpoint 作成に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+      const checkpoints = this.agentBridge.listWorkspaceCheckpoints?.(context.workspaceId, 8) ?? [];
+      const lines = [
+        `Workspace: ${this.agentBridge.getWorkspace?.(context.workspaceId)?.name || context.workspaceId}`,
+        "",
+        ...(checkpoints.length > 0
+          ? checkpoints.map((entry) => `- ${entry.id} :: ${entry.kind || "manual"} :: ${entry.label || "(no label)"}`)
+          : ["- checkpoint はまだありません。"]),
+      ];
+      const chunks = splitMessage(lines.join("\n"), 1800);
+      await message.reply(chunks[0]);
+      for (const chunk of chunks.slice(1)) {
+        await message.channel.send(chunk).catch(() => null);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "rollback!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("rollback! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const [subcommandRaw = "", checkpointIdRaw = ""] = String(bangCommand.args || "").trim().split(/\s+/, 2);
+      const subcommand = subcommandRaw.toLowerCase();
+      const checkpointId = checkpointIdRaw.trim();
+      if (!checkpointId || !["preview", "apply"].includes(subcommand)) {
+        await message.reply("使い方: `rollback! preview <checkpointId>` または `rollback! apply <checkpointId>`");
+        return;
+      }
+      try {
+        const result =
+          subcommand === "apply"
+            ? this.agentBridge.applyWorkspaceRollback?.(context.workspaceId, checkpointId, {
+                approved: true,
+                requestedBy: "Discord",
+                source: "discord",
+              })
+            : this.agentBridge.previewWorkspaceRollback?.(context.workspaceId, checkpointId, {
+                source: "discord",
+              });
+        const lines = subcommand === "apply"
+          ? [
+              `↩ rollback を適用しました: ${checkpointId}`,
+              `workspace=${context.workspaceId}`,
+              `head=${result?.repository?.head || result?.head || "unknown"}`,
+            ]
+          : [
+              `Preview: ${checkpointId}`,
+              `workspace=${context.workspaceId}`,
+              `blocked=${result?.blocked ? "yes" : "no"}`,
+              `reasons=${(result?.reasons || []).join(", ") || "none"}`,
+            ];
+        await message.reply(lines.join("\n"));
+      } catch (err) {
+        await message.reply(`⚠️ rollback に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "skills!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("skills! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const tokens = String(bangCommand.args || "").trim().split(/\s+/).filter(Boolean);
+      const apply = tokens[0]?.toLowerCase() === "apply";
+      const agentName = apply ? (tokens[1] || "") : (tokens[0] || "");
+      try {
+        const result = apply
+          ? this.agentBridge.applyWorkspaceSkillSync?.(context.workspaceId, {
+              agentName,
+              requestedBy: "Discord",
+              source: "discord",
+            })
+          : this.agentBridge.planWorkspaceSkillSync?.(context.workspaceId, {
+              agentName,
+            });
+        const changes = Array.isArray(result?.changes) ? result.changes : [];
+        const lines = [
+          apply ? "🧩 skill sync を適用しました。" : "🧩 skill sync plan:",
+          `workspace=${context.workspaceId}`,
+          ...(changes.length > 0
+            ? changes.slice(0, 10).map((entry) => `- ${entry.action || "noop"} :: ${entry.target || entry.relativePath || "unknown"}`)
+            : ["- 変更はありません。"]),
+        ];
+        await message.reply(splitMessage(lines.join("\n"), 1800)[0]);
+      } catch (err) {
+        await message.reply(`⚠️ skills 実行に失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "status!") {
       if (this.agentBridge && this.agentRegistry?.hasAgents()) {
         const context = this.resolveDiscordWorkspaceContext(message.channelId);
         if (!context.binding || context.invalidBinding || !context.workspaceId) {
@@ -1866,7 +2484,43 @@ export class DiscordAdapter {
           return;
         }
         const workspace = this.agentBridge.getWorkspace?.(context.workspaceId) ?? null;
-        await message.reply(formatWorkspaceStatusMessage(workspace, context.agentName));
+        const requestedAgentName = String(bangCommand.args || "").trim().toLowerCase();
+        const workspaceAgents = this.agentBridge.listWorkspaceAgents?.(context.workspaceId) ?? [];
+        const fallbackAgentEntries =
+          workspaceAgents.length > 0
+            ? workspaceAgents
+            : (context.agentName ? [{ agentName: context.agentName, isParent: true }] : []);
+        const agentEntries = requestedAgentName
+          ? fallbackAgentEntries.filter((entry) => entry.agentName === requestedAgentName)
+          : fallbackAgentEntries;
+        if (requestedAgentName && agentEntries.length === 0) {
+          const knownAgent = this.agentRegistry.get?.(requestedAgentName);
+          await message.reply(
+            knownAgent
+              ? `エージェント \`${requestedAgentName}\` は workspace \`${workspace?.name || context.workspaceId}\` に参加していません。`
+              : `エージェント \`${requestedAgentName}\` が見つかりません。`
+          );
+          return;
+        }
+        const defaultAgent = context.defaultAgent || context.agentName || null;
+        const agentStatuses = agentEntries.map((entry) => {
+          const terminalState = this.agentBridge.getAgentTerminalState(entry.agentName, context.workspaceId);
+          return formatAgentRuntimeStatusLine({
+            agentName: entry.agentName,
+            isParent: Boolean(entry.isParent),
+            isDefault: entry.agentName === defaultAgent,
+            terminalState,
+            queuedCount: this.getWorkspaceQueuedTurns(context.workspaceId, entry.agentName),
+          });
+        });
+        await message.reply(
+          formatWorkspaceRuntimeStatusMessage({
+            workspace,
+            defaultAgent,
+            agentStatuses,
+            focusedAgentName: requestedAgentName,
+          })
+        );
         return;
       }
 
@@ -1880,12 +2534,12 @@ export class DiscordAdapter {
       return;
     }
 
-    if (content === "!help") {
+    if (bangCommand?.command === "help!") {
       await message.reply(formatDiscordHelpText());
       return;
     }
 
-    if (content === "!new") {
+    if (bangCommand?.command === "new!") {
       await this.createOrBindWorkspaceFromChannel({
         channelId: message.channelId,
         channelName: getChannelDisplayName(message.channel) || message.channelId,
@@ -1894,8 +2548,8 @@ export class DiscordAdapter {
       return;
     }
 
-    if (content.startsWith("!bind ")) {
-      const sessionId = content.slice("!bind ".length).trim();
+    if (bangCommand?.command === "bind!") {
+      const sessionId = bangCommand.args;
       const session = this.bridge.bindDiscordChannelWithName(
         sessionId,
         message.channelId,
@@ -1914,6 +2568,18 @@ export class DiscordAdapter {
       const context = this.resolveDiscordWorkspaceContext(message.channelId);
       if (!context.binding || context.invalidBinding || !context.workspaceId || !context.agentName) {
         await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      if (isSlashPassthroughInput(message.content)) {
+        try {
+          await this.agentBridge.sendRemoteCommand(context.agentName, context.workspaceId, message.content, {
+            source: "discord-slash",
+          });
+          await message.react("☑").catch(() => null);
+          await message.reply(`↪ ${context.agentName} に \`${message.content.trim()}\` を送信しました。結果は shared PTY / Chat / Discord に流れます。`);
+        } catch (error) {
+          await message.reply(`⚠️ ${context.agentName}: ${error instanceof Error ? error.message : String(error)}`);
+        }
         return;
       }
       await this.runDiscordAgentPrompt({
@@ -2078,4 +2744,8 @@ export const __testHooks = {
   formatWorkingStatusContent,
   getUnsyncedSuffix,
   formatDiscordHelpText,
+  formatWorkspaceRuntimeStatusMessage,
+  formatTerminalOutputMessage,
+  formatLocalInputMessage,
+  isSlashPassthroughInput,
 };

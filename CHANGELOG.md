@@ -183,12 +183,26 @@
 
 ## Unreleased
 
-今後の改修候補:
-
-- デスクトップ配布まわりの追加整備
-- drag & drop 添付の改善
-- 運用上の安全対策の強化
-- ドキュメント拡充
+- workspace-first runtime を拡張し、次の backend / Discord / UI surface を追加
+  - Git checkpoint / rollback preview / apply
+  - saved session binding list / resume
+  - shared PTY restart eligibility / restart
+  - operation audit / skill registry / workspace skill sync
+  - workspace memory consolidation / AI diary preview/apply
+  - workspace terminal state list と drift warning payload
+- Discord bang command を拡張
+  - `bindings!`
+  - `resume! [agent]`
+  - `restart! [agent]`
+  - `checkpoints!`
+  - `rollback!`
+  - `skills! [agent]`
+- chat bubble から URL / Windows path / `file:///` を linkify し、軽量 file viewer で `GET /api/files/view` を開けるよう改善
+- sensitive runtime API 向けに bearer token / loopback auth を追加し、`.env.example` / README を更新
+- 回帰を拡張
+  - `scripts\test-multiCLI-discord-base.mjs` → **73/73**
+  - `scripts\test-multiCLI-discord-base-extended.mjs` → **261/261**
+  - browser smoke で chat file viewer open / close を確認
 
 ## 0.1.0 - 2026-03-18
 

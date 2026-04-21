@@ -57,6 +57,20 @@
             bare prompt は親 agent へ、<code>agentName? prompt</code> で子 agent へ送信
           </div>
           <div class="chat-log" id="chat-log"></div>
+          <section id="chat-file-viewer" class="chat-file-viewer" hidden>
+            <div class="chat-file-viewer-header">
+              <div>
+                <div class="chat-file-viewer-title">File Viewer</div>
+                <div id="chat-file-viewer-path" class="chat-file-viewer-path">-</div>
+              </div>
+              <div class="chat-file-viewer-actions">
+                <a id="chat-file-viewer-open" class="btn-outline chat-file-viewer-open" href="#" target="_blank" rel="noopener noreferrer">開く</a>
+                <button id="btn-chat-file-viewer-close" class="btn-outline" type="button">閉じる</button>
+              </div>
+            </div>
+            <div id="chat-file-viewer-meta" class="chat-file-viewer-meta"></div>
+            <pre id="chat-file-viewer-content" class="chat-file-viewer-content"></pre>
+          </section>
           <div class="chat-input-bar">
             <textarea
               id="chat-input"
@@ -76,11 +90,18 @@
                 <span id="terminal-workspace-label" class="terminal-workspace-label">workspace: -</span>
                 <span id="terminal-status-badge" class="terminal-status-badge disconnected">disconnected</span>
               </div>
-               <div id="terminal-shared-hint" class="terminal-shared-hint">
-                 Chat / Discord / Schedule と同じ PTY stdin/stdout を共有
-               </div>
-               <div id="terminal-config-warning" class="terminal-config-warning" hidden></div>
-             </div>
+                <div id="terminal-shared-hint" class="terminal-shared-hint">
+                  Chat / Discord / Schedule と同じ PTY stdin/stdout を共有
+                </div>
+                <div id="terminal-config-warning" class="terminal-config-warning" hidden></div>
+                <div id="terminal-approval-banner" class="terminal-approval-banner" hidden>
+                  <div id="terminal-approval-text" class="terminal-approval-text"></div>
+                  <div class="terminal-approval-actions">
+                    <button class="btn-terminal-action" id="btn-terminal-approve" disabled>approve</button>
+                    <button class="btn-terminal-kill" id="btn-terminal-deny" disabled>deny</button>
+                  </div>
+                </div>
+              </div>
               <div class="terminal-actions">
                   <button class="btn-terminal-action" id="btn-terminal-layout-side" title="marker を右側に表示" disabled hidden>⇥ Right</button>
                   <button class="btn-terminal-action" id="btn-terminal-layout-bottom" title="marker を下側に表示" disabled hidden>⇩ Bottom</button>
@@ -181,6 +202,9 @@
                 <label>デフォルト workdir</label>
                 <input id="settings-workdir" type="text" class="settings-input" placeholder="例: C:\Users\you\projects\myapp" />
                 <button id="btn-save-workdir" class="btn-settings-save">保存</button>
+                <label>Global memory (Markdown)</label>
+                <textarea id="global-memory-input" class="settings-input settings-textarea" rows="8" placeholder="全 workspace 共通の固定メモ"></textarea>
+                <button id="btn-save-global-memory" class="btn-settings-save">global memory を保存</button>
               </div>
             </section>
 
@@ -195,10 +219,22 @@
                 <input id="session-parent-agent" type="text" class="settings-input" readonly />
                 <label>Discord channel</label>
                 <select id="session-discord-channel" class="settings-input"></select>
+                <label>context 注入</label>
+                <select id="session-context-mode" class="settings-input">
+                  <option value="default">既定（単一agent OFF / 複数agent ON）</option>
+                  <option value="on">ON</option>
+                  <option value="off">OFF</option>
+                </select>
               </div>
+              <p id="session-context-hint" class="settings-inline-hint" hidden></p>
               <div class="settings-actions">
                 <button id="btn-session-save" class="btn-settings-save">保存</button>
                 <button id="btn-session-delete" class="btn-outline btn-danger">workspace を削除</button>
+              </div>
+              <div class="settings-form">
+                <label>Workspace memory (Markdown)</label>
+                <textarea id="session-memory-input" class="settings-input settings-textarea" rows="8" placeholder="この workspace 専用の固定メモ"></textarea>
+                <button id="btn-save-session-memory" class="btn-settings-save">workspace memory を保存</button>
               </div>
             </section>
 
@@ -237,6 +273,11 @@
               <div class="settings-actions">
                 <button id="btn-agent-save" class="btn-settings-save">保存</button>
                 <button id="btn-agent-delete" class="btn-outline btn-danger">agent を削除</button>
+              </div>
+              <div class="settings-form">
+                <label>Agent memory (Markdown)</label>
+                <textarea id="agent-memory-input" class="settings-input settings-textarea" rows="8" placeholder="この agent 固有の固定メモ"></textarea>
+                <button id="btn-save-agent-memory" class="btn-settings-save">agent memory を保存</button>
               </div>
             </section>
           </div>

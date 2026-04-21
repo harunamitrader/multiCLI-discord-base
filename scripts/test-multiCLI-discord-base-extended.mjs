@@ -3,9 +3,8 @@
  *
  * test-multiCLI-discord-base.mjs でカバーしていない領域をテスト:
  *   6. コマンドパーサー エッジケース
- *   7. Pricing エッジケース (prefix matching / cache tokens)
- *   8. Canonical Event Normalizer エッジケース
- *   9. Store エッジケース (period filter / multi-agent / null handling)
+ *   7. Canonical Event Normalizer エッジケース
+ *   8. Store エッジケース (multi-agent / null handling)
  *  10. AgentBridge 単体テスト (モックストア使用)
  *  11. API エラーケース (不正入力・存在しないリソース)
  *  12. HTTP ヘッダー / SSE / xterm 静的ファイル
@@ -17,8 +16,10 @@ import { createDatabase } from "../server/src/db.js";
 import { Store } from "../server/src/store.js";
 import { AgentBridge } from "../server/src/agent-bridge.js";
 import { DiscordAdapter, __testHooks as discordTestHooks } from "../server/src/discord-adapter.js";
-import { calcCost, formatUsage } from "../server/src/pricing.js";
+import { createHttpServer } from "../server/src/http-server.js";
+import { MemoryService } from "../server/src/memory-service.js";
 import { PtyService, __testHooks as ptyTestHooks } from "../server/src/pty-service.js";
+import { buildContextBlock, resolveWorkspaceContextPolicy } from "../server/src/context-policy.js";
 import {
   normalizeClaudeEvent,
   normalizeGeminiEvent,
@@ -59,13 +60,18 @@ function section(name) {
 
 function parseAgentCommand(content, agentNames) {
   const trimmed = content.trim();
-  if (/^stop\?$/i.test(trimmed)) return { agent: null, verb: "stop", prompt: null };
-  if (/^agents?\?$/i.test(trimmed)) return { agent: null, verb: "agents", prompt: null };
-  const wsMatch = trimmed.match(/^workspace\?\s*([\s\S]*)$/i);
-  if (wsMatch) return { agent: null, verb: "workspace", prompt: wsMatch[1].trim() };
-  const costMatch = trimmed.match(/^cost\?\s*(today|week|month|all)?$/i);
-  if (costMatch) return { agent: null, verb: "cost", prompt: (costMatch[1] || "all").toLowerCase() };
-  const verbMatch = trimmed.match(/^(\S+)\s+(new|stop|reset)\?$/i);
+  const bangIndex = trimmed.indexOf("!");
+  const bang = bangIndex <= 0
+    ? null
+    : {
+        raw: trimmed.slice(0, bangIndex + 1),
+        command: trimmed.slice(0, bangIndex + 1).toLowerCase(),
+        args: trimmed.slice(bangIndex + 1).trim(),
+      };
+  if (bang?.command === "stop!") return { agent: null, verb: "stop", prompt: null };
+  if (bang?.command === "agents!") return { agent: null, verb: "agents", prompt: null };
+  if (bang?.command === "workspace!") return { agent: null, verb: "workspace", prompt: bang.args };
+  const verbMatch = bang?.raw.match(/^(\S+)\s+(new|stop|reset)!$/i);
   if (verbMatch) {
     const name = verbMatch[1].toLowerCase();
     if (agentNames.includes(name)) return { agent: name, verb: verbMatch[2].toLowerCase(), prompt: null };
@@ -84,22 +90,21 @@ const agents = ["hanako", "taro", "jiro"];
 
 // Case insensitivity
 {
-  const r = parseAgentCommand("STOP?", agents);
-  ok("STOP? (uppercase) → verb=stop", r?.verb === "stop");
+  const r = parseAgentCommand("STOP!", agents);
+  ok("STOP! (uppercase) → verb=stop", r?.verb === "stop");
 }
 {
-  const r = parseAgentCommand("AGENTS?", agents);
-  ok("AGENTS? → verb=agents", r?.verb === "agents");
+  const r = parseAgentCommand("AGENTS!", agents);
+  ok("AGENTS! → verb=agents", r?.verb === "agents");
 }
 {
-  const r = parseAgentCommand("WORKSPACE? foo", agents);
-  ok("WORKSPACE? foo → prompt=foo", r?.verb === "workspace" && r?.prompt === "foo");
+  const r = parseAgentCommand("WORKSPACE! foo", agents);
+  ok("WORKSPACE! foo → prompt=foo", r?.verb === "workspace" && r?.prompt === "foo");
 }
 {
-  const r = parseAgentCommand("COST? TODAY", agents);
-  ok("COST? TODAY → prompt=today (lowercase)", r?.verb === "cost" && r?.prompt === "today");
+  const r = parseAgentCommand("AGENT!", agents);
+  ok("AGENT! → null (exact match only)", r === null);
 }
-
 // Leading/trailing whitespace
 {
   const r = parseAgentCommand("  hanako? バグ修正  ", agents);
@@ -112,22 +117,16 @@ const agents = ["hanako", "taro", "jiro"];
   ok("multi-line prompt → preserved newlines", r?.agent === "hanako" && r?.prompt.includes("\n"));
 }
 
-// workspace? with spaces in name
+// workspace! with spaces in name
 {
-  const r = parseAgentCommand("workspace? my cool project", agents);
-  ok("workspace? with spaces → full prompt", r?.prompt === "my cool project");
-}
-
-// cost? with invalid period → treated as all (no match, returns null)
-{
-  const r = parseAgentCommand("cost? yesterday", agents);
-  ok("cost? invalid period → null (not a cost command)", r === null);
+  const r = parseAgentCommand("workspace! my cool project", agents);
+  ok("workspace! with spaces → full prompt", r?.prompt === "my cool project");
 }
 
 // Agent name that starts with a verb keyword
 {
-  const r = parseAgentCommand("stop?", agents);
-  ok("stop? global (not an agent named stop)", r?.verb === "stop" && !r?.agent);
+  const r = parseAgentCommand("stop!", agents);
+  ok("stop! global (not an agent named stop)", r?.verb === "stop" && !r?.agent);
 }
 
 // Empty string
@@ -148,58 +147,9 @@ const agents = ["hanako", "taro", "jiro"];
   ok("prompt with ? char → preserved", r?.prompt === "これは何ですか？");
 }
 
-// ── 7. Pricing エッジケース ────────────────────────────────────────────────
+// ── 7. Canonical Event Normalizer エッジケース ────────────────────────────
 
-section("7. Pricing エッジケース");
-
-// Prefix matching
-{
-  // "claude-opus-4-6-20251101" should match "claude-opus-4-6"
-  const cost = calcCost("claude-opus-4-6-20251101", { inputTokens: 1_000_000, outputTokens: 0 });
-  ok("prefix match: claude-opus-4-6-20251101 → $15.00", cost && approx(cost.usd, 15.0, 0.001));
-}
-{
-  const cost = calcCost("gemini-2.5-pro-preview", { inputTokens: 1_000_000, outputTokens: 0 });
-  ok("prefix match: gemini-2.5-pro-preview → $1.25", cost && approx(cost.usd, 1.25, 0.001));
-}
-
-// Cache read tokens
-{
-  const cost = calcCost("claude-sonnet-4-6", {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 1_000_000,
-  });
-  ok("claude-sonnet-4-6 cacheRead 1M → $0.30", cost && approx(cost.usd, 0.30, 0.001));
-}
-
-// Zero tokens
-{
-  const cost = calcCost("claude-sonnet-4-6", { inputTokens: 0, outputTokens: 0 });
-  ok("zero tokens → $0.00", cost && approx(cost.usd, 0, 1e-10));
-}
-
-// JPY conversion
-{
-  const cost = calcCost("claude-sonnet-4-6", { inputTokens: 1_000_000, outputTokens: 0 });
-  ok("JPY = USD * 150 (rounded)", cost && approx(cost.jpy, Math.round(cost.usd * 150 * 10) / 10, 0.01));
-}
-
-// formatUsage with cache tokens
-{
-  const str = formatUsage("claude-sonnet-4-6", { inputTokens: 5000, outputTokens: 2000, cacheReadTokens: 1000 });
-  ok("formatUsage with cache tokens → has cost", str.includes("¥") || str.includes("$"));
-}
-
-// formatUsage with null usage
-{
-  const str = formatUsage("claude-sonnet-4-6", null);
-  ok("formatUsage with null → ''", str === "");
-}
-
-// ── 8. Canonical Event Normalizer エッジケース ────────────────────────────
-
-section("8. Canonical Event Normalizer エッジケース");
+section("7. Canonical Event Normalizer エッジケース");
 
 // Claude: error result
 {
@@ -317,62 +267,14 @@ section("8. Canonical Event Normalizer エッジケース");
   ok("Gemini error result → run.error", events[0]?.type === "run.error");
 }
 
-// ── 9. Store エッジケース ────────────────────────────────────────────────
+// ── 8. Store エッジケース ────────────────────────────────────────────────
 
-section("9. Store エッジケース");
+section("8. Store エッジケース");
 
 const db = createDatabase(":memory:", {});
 const store = new Store(db);
 const primaryWorkspace = store.createWorkspace({ name: "primary-workspace" });
 const primaryWorkspaceId = primaryWorkspace.id;
-
-// getCostSummary: period filter (all runs should be returned since since=very old date)
-{
-  store.upsertAgent({ name: "alpha", type: "claude", model: "claude-sonnet-4-6" });
-  store.upsertAgent({ name: "beta", type: "gemini", model: "gemini-2.5-flash" });
-
-  // Add completed runs for alpha
-  const r1 = store.startRun({ agentName: "alpha", workspaceId: primaryWorkspaceId, prompt: "p1", source: "test" });
-  store.completeRun(r1.id, { status: "completed", inputTokens: 100, outputTokens: 50, costUsd: 0.005 });
-
-  const r2 = store.startRun({ agentName: "alpha", workspaceId: primaryWorkspaceId, prompt: "p2", source: "test" });
-  store.completeRun(r2.id, { status: "completed", inputTokens: 200, outputTokens: 100, costUsd: 0.010 });
-
-  // Add completed run for beta
-  const r3 = store.startRun({ agentName: "beta", workspaceId: primaryWorkspaceId, prompt: "p3", source: "test" });
-  store.completeRun(r3.id, { status: "completed", inputTokens: 500, outputTokens: 200, costUsd: 0.020 });
-
-  // Add failed run (should NOT appear in cost)
-  const r4 = store.startRun({ agentName: "alpha", workspaceId: primaryWorkspaceId, prompt: "p4", source: "test" });
-  store.completeRun(r4.id, { status: "error" });
-
-  const all = store.getCostSummary({});
-  ok("getCostSummary all: 2 agents", all.length === 2);
-
-  const alphaRow = all.find((r) => r.agentName === "alpha");
-  ok("getCostSummary alpha: runCount=2 (errors excluded)", alphaRow?.runCount === 2);
-  ok("getCostSummary alpha: totalInputTokens=300", alphaRow?.totalInputTokens === 300);
-  ok("getCostSummary alpha: totalCostUsd≈0.015", approx(alphaRow?.totalCostUsd, 0.015, 1e-6));
-}
-
-// getCostSummary: filter by agent
-{
-  const betaOnly = store.getCostSummary({ agentName: "beta" });
-  ok("getCostSummary by agentName: 1 row", betaOnly.length === 1);
-  ok("getCostSummary beta: totalCostUsd≈0.020", approx(betaOnly[0]?.totalCostUsd, 0.020, 1e-6));
-}
-
-// getCostSummary: no results for non-existent agent
-{
-  const none = store.getCostSummary({ agentName: "nonexistent" });
-  ok("getCostSummary nonexistent agent → []", none.length === 0);
-}
-
-// getCostSummary: future 'since' → no results
-{
-  const future = store.getCostSummary({ since: "2099-01-01 00:00:00" });
-  ok("getCostSummary with future since → []", future.length === 0);
-}
 
 // deleteWorkspace
 {
@@ -459,15 +361,43 @@ const primaryWorkspaceId = primaryWorkspace.id;
 {
   const ws = store.createWorkspace({ name: "updatable", workdir: "/old" });
   const updated = store.updateWorkspace(ws.id, { workdir: null });
-  // null means keep existing (not unset) per implementation
-  ok("updateWorkspace null workdir keeps old", updated?.workdir === "/old");
+  ok("updateWorkspace null workdir clears value", updated?.workdir === null);
+}
+
+// workspace sidebar layout: active cap and sort normalization
+{
+  const layoutDb = createDatabase(":memory:", {});
+  const layoutStore = new Store(layoutDb);
+  const created = Array.from({ length: 6 }, (_, index) =>
+    layoutStore.createWorkspace({ name: `layout-${index + 1}` })
+  );
+  const saved = layoutStore.saveWorkspaceLayout(created.map((workspace, index) => ({
+    id: workspace.id,
+    isSidebarActive: true,
+    sortOrder: index,
+  })));
+  const active = saved.filter((workspace) => workspace.isSidebarActive);
+  const inactive = saved.filter((workspace) => !workspace.isSidebarActive);
+  ok("saveWorkspaceLayout → active capped to 5", active.length === 5);
+  ok("saveWorkspaceLayout → overflow moved to inactive", inactive.length === 1);
+  ok(
+    "saveWorkspaceLayout → active sortOrder renumbered",
+    active.every((workspace, index) => workspace.sortOrder === index),
+  );
+  ok(
+    "saveWorkspaceLayout → overflow workspace becomes first inactive",
+    inactive[0]?.id === created[5]?.id && inactive[0]?.sortOrder === 0,
+  );
 }
 
 // listRuns
 {
+  store.upsertAgent({ name: "alpha", type: "claude", model: "claude-sonnet-4-6" });
+  store.startRun({ agentName: "alpha", workspaceId: primaryWorkspaceId, prompt: "run-a", source: "test" });
+  store.startRun({ agentName: "alpha", workspaceId: primaryWorkspaceId, prompt: "run-b", source: "test" });
   const runs = store.listRuns("alpha", primaryWorkspaceId, 5);
   ok("listRuns → returns runs array", Array.isArray(runs));
-  ok("listRuns → most recent first", runs.length > 0 && runs[0].startedAt >= (runs[1]?.startedAt ?? ""));
+  ok("listRuns → most recent first", runs.length >= 2 && runs[0].startedAt >= runs[1].startedAt);
 }
 
 // ── 10. AgentBridge 単体テスト ─────────────────────────────────────────────
@@ -507,6 +437,11 @@ section("10. AgentBridge 単体テスト");
   // createWorkspace
   const ws = ab.createWorkspace({ name: "ab-test-ws" });
   ok("AgentBridge.createWorkspace() → id exists", !!ws?.id);
+  ok("AgentBridge.createWorkspace() → single-agent default context policy is off", ws?.contextPolicy?.effective === false);
+
+  const updatedWs = ab.updateWorkspace(ws.id, { contextInjectionEnabled: true });
+  ok("AgentBridge.updateWorkspace() → contextInjectionEnabled=true", updatedWs?.contextInjectionEnabled === true);
+  ok("AgentBridge.updateWorkspace() → context policy reflects explicit on", updatedWs?.contextPolicy?.effective === true);
 
   // getWorkspaceByName
   const found = ab.getWorkspaceByName("ab-test-ws");
@@ -526,14 +461,140 @@ section("10. AgentBridge 単体テスト");
   ok("AgentBridge.deleteWorkspace(workspace) → returns workspace", delWorkspace?.id === ws.id);
   ok("AgentBridge.deleteWorkspace(last workspace) → zero workspaces allowed", ab.listWorkspaces().length === 0);
 
-  // getCostSummary (no runs yet)
-  const cost = ab.getCostSummary({ period: "all" });
-  ok("AgentBridge.getCostSummary() → array", Array.isArray(cost));
-
   // runPrompt with non-existent agent → throws
   let threw2 = false;
   try { await ab.runPrompt({ agentName: "does-not-exist", prompt: "hi" }); } catch { threw2 = true; }
   ok("AgentBridge.runPrompt unknown agent → throws", threw2);
+}
+
+{
+  const dbLayoutBridge = createDatabase(":memory:", {});
+  const storeLayoutBridge = new Store(dbLayoutBridge);
+  const workspaceA = storeLayoutBridge.createWorkspace({ name: "bridge-layout-a" });
+  const workspaceB = storeLayoutBridge.createWorkspace({ name: "bridge-layout-b" });
+  const workspaceC = storeLayoutBridge.createWorkspace({ name: "bridge-layout-c" });
+  const abLayout = new AgentBridge({
+    agentRegistry: {
+      setStore() {},
+      switchWorkspace() {},
+      list: () => [],
+      get: () => null,
+    },
+    store: storeLayoutBridge,
+    bus: { publish() {} },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const updatedLayout = abLayout.updateWorkspaceLayout([
+    { id: workspaceC.id, isSidebarActive: true, sortOrder: 0 },
+    { id: workspaceA.id, isSidebarActive: true, sortOrder: 1 },
+    { id: workspaceB.id, isSidebarActive: false, sortOrder: 0 },
+  ]);
+  ok("AgentBridge updateWorkspaceLayout → reordered active workspace first", updatedLayout[0]?.id === workspaceC.id);
+  ok("AgentBridge updateWorkspaceLayout → keeps inactive section last", updatedLayout.at(-1)?.id === workspaceB.id);
+}
+
+{
+  const dbPrewarmBridge = createDatabase(":memory:", {});
+  const storePrewarmBridge = new Store(dbPrewarmBridge);
+  storePrewarmBridge.upsertAgent({
+    name: "prewarm-gemini",
+    type: "gemini",
+    model: "gemini-2.5-flash",
+    status: "stopped",
+    enabled: true,
+    settings: { workdir: "C:\\workspace-agent" },
+  });
+  const workspace = storePrewarmBridge.createWorkspace({ name: "prewarm-workspace", workdir: "C:\\workspace-root" });
+  storePrewarmBridge.addWorkspaceAgent({ workspaceId: workspace.id, agentName: "prewarm-gemini", isParent: true });
+  const prewarmCalls = [];
+  const abPrewarm = new AgentBridge({
+    agentRegistry: {
+      setStore() {},
+      switchWorkspace() {},
+      list: () => [storePrewarmBridge.getAgent("prewarm-gemini")],
+      get: (name) => storePrewarmBridge.getAgent(name),
+    },
+    store: storePrewarmBridge,
+    bus: { publish() {} },
+    config: { codexWorkdir: process.cwd() },
+    ptyService: {
+      async prewarmAgent(payload) {
+        prewarmCalls.push(payload);
+        return { status: "idle", hasProcess: true, readyForPrompt: false };
+      },
+    },
+  });
+  const prewarmResult = await abPrewarm.prewarmWorkspaceAgent("prewarm-gemini", workspace.id);
+  ok("AgentBridge prewarmWorkspaceAgent → delegates to ptyService", prewarmCalls.length === 1);
+  ok(
+    "AgentBridge prewarmWorkspaceAgent → resolves effective workdir",
+    prewarmCalls[0]?.workdir === "C:\\workspace-agent",
+  );
+  ok("AgentBridge prewarmWorkspaceAgent → returns terminal state", prewarmResult?.hasProcess === true);
+}
+
+{
+  const dbContextPrompt = createDatabase(":memory:", {});
+  const storeContextPrompt = new Store(dbContextPrompt);
+  const publishedEvents = [];
+  const workspaceContextPrompt = storeContextPrompt.createWorkspace({
+    name: "context-prompt",
+    contextInjectionEnabled: true,
+  });
+  storeContextPrompt.addMessage({
+    agentName: "claude-main",
+    workspaceId: workspaceContextPrompt.id,
+    runId: null,
+    role: "user",
+    content: "前の依頼です",
+    source: "test",
+  });
+  storeContextPrompt.addMessage({
+    agentName: "claude-main",
+    workspaceId: workspaceContextPrompt.id,
+    runId: null,
+    role: "assistant",
+    content: "前の返答です",
+    source: "agent",
+  });
+  const abContextPrompt = new AgentBridge({
+    agentRegistry: {
+      setStore() {},
+      hydrateFromStore() {},
+      switchWorkspace() {},
+      list: () => [],
+      get: (name) => (name === "claude-main" ? { name: "claude-main", type: "claude", settings: {} } : null),
+    },
+    store: storeContextPrompt,
+    bus: { publish: (type, payload) => publishedEvents.push({ type, payload }), on() {} },
+    config: { codexWorkdir: process.cwd() },
+    ptyService: {
+      async assertPromptReady() {},
+      async sendPrompt() {
+        return { text: "OK", finalStatus: "completed" };
+      },
+      getAgentTerminalState() {
+        return { status: "idle" };
+      },
+    },
+  });
+  await abContextPrompt.runPrompt({
+    agentName: "claude-main",
+    workspaceId: workspaceContextPrompt.id,
+    prompt: "最新の依頼",
+  });
+  const savedUser = [...storeContextPrompt.listMessages("claude-main", workspaceContextPrompt.id, 10)]
+    .reverse()
+    .find((message) => message.role === "user");
+  const emittedUser = publishedEvents.find((event) => event.type === "message.user");
+  ok(
+    "AgentBridge.runPrompt stores visible context metadata on user message",
+    savedUser?.metadata?.inputMode === "prompt" && savedUser?.metadata?.context?.used === true,
+  );
+  ok(
+    "AgentBridge.runPrompt emits user metadata with context visibility",
+    emittedUser?.payload?.metadata?.context?.used === true,
+  );
 }
 
 {
@@ -616,6 +677,249 @@ section("10. AgentBridge 単体テスト");
 }
 
 {
+  const dbSlashBridge = createDatabase(":memory:", {});
+  const storeSlashBridge = new Store(dbSlashBridge);
+  const workspaceSlashBridge = storeSlashBridge.createWorkspace({ name: "slash-bridge" });
+  let remoteCommandPayload = null;
+  const abSlashBridge = new AgentBridge({
+    agentRegistry: {
+      setStore() {},
+      hydrateFromStore() {},
+      switchWorkspace() {},
+      list: () => [],
+      get: (name) => (name === "gemini" ? { name: "gemini", type: "gemini", settings: {} } : null),
+    },
+    store: storeSlashBridge,
+    bus: { publish() {}, on() {} },
+    config: { codexWorkdir: process.cwd() },
+    ptyService: {
+      async assertPromptReady() {},
+      async sendRemoteCommand(payload) {
+        remoteCommandPayload = payload;
+        return { ok: true, text: "", finalStatus: "running" };
+      },
+      getAgentTerminalState() {
+        return { status: "idle" };
+      },
+    },
+  });
+  const slashResult = await abSlashBridge.runPrompt({
+    agentName: "gemini",
+    workspaceId: workspaceSlashBridge.id,
+    prompt: "/help",
+    inputMode: "slash_command",
+    source: "ui",
+  });
+  ok("AgentBridge.runPrompt slash_command delegates to sendRemoteCommand", remoteCommandPayload?.command === "/help");
+  ok("AgentBridge.runPrompt slash_command keeps input metadata", remoteCommandPayload?.metadata?.inputMode === "slash_command");
+  ok(
+    "AgentBridge.runPrompt slash_command does not pre-save duplicate messages",
+    storeSlashBridge.listMessages("gemini", workspaceSlashBridge.id, 10).length === 0 && slashResult?.finalStatus === "running",
+  );
+}
+
+{
+  const dbTerminalTurn = createDatabase(":memory:", {});
+  const storeTerminalTurn = new Store(dbTerminalTurn);
+  const workspaceTerminalTurn = storeTerminalTurn.createWorkspace({ name: "terminal-turn-source" });
+  storeTerminalTurn.upsertAgent({ name: "gemini", type: "gemini", model: "gemini-2.5-flash" });
+  const bridgeTerminalTurn = new AgentBridge({
+    agentRegistry: {
+      setStore() {},
+      hydrateFromStore() {},
+      switchWorkspace() {},
+      list: () => [],
+      get: (name) => (name === "gemini" ? { name: "gemini", type: "gemini", settings: {} } : null),
+    },
+    store: storeTerminalTurn,
+    bus: { publish() {}, on() {} },
+    config: { codexWorkdir: process.cwd() },
+  });
+  await bridgeTerminalTurn.recordTerminalTurn({
+    agentName: "gemini",
+    workspaceId: workspaceTerminalTurn.id,
+    prompt: "/help",
+    text: "ok",
+    source: "discord-slash",
+    metadata: { inputMode: "slash_command" },
+  });
+  await bridgeTerminalTurn.recordTerminalTurn({
+    agentName: "gemini",
+    workspaceId: workspaceTerminalTurn.id,
+    prompt: "/status",
+    text: "ok",
+    source: "ui",
+    metadata: { inputMode: "slash_command" },
+  });
+  await bridgeTerminalTurn.recordTerminalTurn({
+    agentName: "gemini",
+    workspaceId: workspaceTerminalTurn.id,
+    prompt: "manual prompt",
+    text: "ok",
+  });
+  const runs = storeTerminalTurn.listRuns("gemini", workspaceTerminalTurn.id, 10);
+  const messages = storeTerminalTurn.listMessages("gemini", workspaceTerminalTurn.id, 20).filter((message) => message.role === "user");
+  const slashRun = runs.find((run) => run.prompt === "/help");
+  const uiRun = runs.find((run) => run.prompt === "/status");
+  const terminalRun = runs.find((run) => run.prompt === "manual prompt");
+  const slashMessage = messages.find((message) => message.content === "/help");
+  const uiMessage = messages.find((message) => message.content === "/status");
+  const terminalMessage = messages.find((message) => message.content === "manual prompt");
+  ok(
+    "recordTerminalTurn discord-slash keeps runs.source and messages.source aligned",
+    slashRun?.source === "discord-slash" && slashMessage?.source === "discord-slash",
+  );
+  ok(
+    "recordTerminalTurn ui keeps runs.source and messages.source aligned",
+    uiRun?.source === "ui" && uiMessage?.source === "ui",
+  );
+  ok(
+    "recordTerminalTurn defaults missing source to terminal",
+    terminalRun?.source === "terminal" && terminalMessage?.source === "terminal",
+  );
+}
+
+{
+  const memoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "multiCLI-discord-base-memory-"));
+  const memoryService = new MemoryService({ rootDir: memoryRoot });
+  const globalMemory = memoryService.setGlobalMemory("# global");
+  const workspaceMemory = memoryService.setWorkspaceMemory("ws-1", "workspace memo");
+  const agentMemory = memoryService.setAgentMemory("gemini", "agent memo");
+  ok("MemoryService global memory persists text", globalMemory.content === "# global");
+  ok("MemoryService workspace memory persists text", workspaceMemory.content === "workspace memo");
+  ok("MemoryService agent memory persists text", agentMemory.content === "agent memo");
+  fs.rmSync(memoryRoot, { recursive: true, force: true });
+}
+
+{
+  const dbSnapshot = createDatabase(":memory:", {});
+  const storeSnapshot = new Store(dbSnapshot);
+  const workspaceSnapshot = storeSnapshot.createWorkspace({ name: "snapshot-ws" });
+  storeSnapshot.upsertAgent({ name: "gemini", type: "gemini", model: "gemini-2.5-flash" });
+  const interruptedRun = storeSnapshot.startRun({
+    agentName: "gemini",
+    workspaceId: workspaceSnapshot.id,
+    prompt: "resume later",
+    source: "test",
+  });
+  const snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), "multiCLI-discord-base-snapshot-"));
+  const snapshotPath = path.join(snapshotDir, "state.json");
+  fs.writeFileSync(snapshotPath, JSON.stringify({
+    version: 1,
+    entries: [{
+      agentName: "gemini",
+      workspaceId: workspaceSnapshot.id,
+      workdir: process.cwd(),
+      sessionRef: "session-123",
+      status: "running",
+      hasProcess: true,
+      runId: interruptedRun.id,
+    }],
+  }), "utf8");
+  const snapshotBusEvents = [];
+  const ptySnapshot = new PtyService({
+    agentRegistry: {
+      get: (name) => (name === "gemini" ? { name, type: "gemini", model: "gemini-2.5-flash", settings: {} } : null),
+      list: () => [{ name: "gemini", type: "gemini" }],
+    },
+    config: { codexWorkdir: process.cwd(), runtimeStatePath: snapshotPath },
+    bus: { publish: (type, payload) => snapshotBusEvents.push({ type, payload }) },
+    store: storeSnapshot,
+  });
+  const restored = ptySnapshot.restoreRuntimeSnapshot();
+  const restoredState = ptySnapshot.getAgentTerminalState("gemini", workspaceSnapshot.id);
+  const restoredRun = storeSnapshot.listRuns("gemini", workspaceSnapshot.id, 5)[0];
+  ok("PtyService.restoreRuntimeSnapshot() → restores entry count", restored.restoredCount === 1);
+  ok("PtyService.restoreRuntimeSnapshot() → marks interrupted run", restoredRun?.status === "interrupted");
+  ok(
+    "PtyService.restoreRuntimeSnapshot() → exposes recovery warning",
+    restoredState.status === "idle" &&
+      restoredState.warningCode === "runtime_recovered" &&
+      restoredState.warningMessage.includes("safe idle"),
+  );
+  fs.rmSync(snapshotDir, { recursive: true, force: true });
+}
+
+{
+  const dbApproval = createDatabase(":memory:", {});
+  const storeApproval = new Store(dbApproval);
+  const workspaceApproval = storeApproval.createWorkspace({ name: "approval-ws" });
+  const writes = [];
+  const approvalDir = fs.mkdtempSync(path.join(os.tmpdir(), "multiCLI-discord-base-approval-"));
+  const ptyApproval = new PtyService({
+    agentRegistry: {
+      get: (name) => (name === "gemini" ? { name, type: "gemini", settings: {} } : null),
+      list: () => [{ name: "gemini", type: "gemini" }],
+    },
+    config: { codexWorkdir: process.cwd(), runtimeStatePath: path.join(approvalDir, "state.json") },
+    bus: { publish() {} },
+    store: storeApproval,
+  });
+  const approvalKey = `${workspaceApproval.id}:gemini`;
+  const approvalState = ptyApproval._ensureState(approvalKey, "gemini", workspaceApproval.id);
+  approvalState.status = "waiting_input";
+  approvalState.approvalRequest = {
+    id: "approval-1",
+    status: "pending",
+    summary: "approve access?",
+    excerpt: "approve access?",
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  ptyApproval._ptys.set(approvalKey, { write: (value) => writes.push(value) });
+  const approvalResult = ptyApproval.respondToApproval("gemini", workspaceApproval.id, "approve");
+  ok("PtyService.respondToApproval() → writes y+enter", writes[0] === "y\r");
+  ok("PtyService.respondToApproval() → succeeds", approvalResult?.ok === true);
+  fs.rmSync(approvalDir, { recursive: true, force: true });
+}
+
+{
+  const dbDrift = createDatabase(":memory:", {});
+  const storeDrift = new Store(dbDrift);
+  const workspaceDrift = storeDrift.createWorkspace({ name: "drift-ws" });
+  const driftDir = fs.mkdtempSync(path.join(os.tmpdir(), "multiCLI-discord-base-drift-"));
+  const driftEvents = [];
+  const ptyDrift = new PtyService({
+    agentRegistry: {
+      get: (name) => ({ name, type: "gemini", settings: {} }),
+      list: () => [{ name: "gemini", type: "gemini" }],
+    },
+    config: {
+      codexWorkdir: process.cwd(),
+      runtimeStatePath: path.join(driftDir, "state.json"),
+      driftDetection: {
+        pollMs: 5000,
+        runningSilenceMs: 60000,
+        readySilenceMs: 120000,
+      },
+    },
+    bus: { publish: (type, payload) => driftEvents.push({ type, payload }) },
+    store: storeDrift,
+  });
+  const driftKey = `${workspaceDrift.id}:gemini`;
+  const driftState = ptyDrift._ensureState(driftKey, "gemini", workspaceDrift.id);
+  driftState.status = "running";
+  driftState.lastOutputAt = Date.now() - 61000;
+  ptyDrift._ptys.set(driftKey, { write() {} });
+  const stalledState = ptyDrift.getAgentTerminalState("gemini", workspaceDrift.id);
+  ok("PtyService drift → stalled warningCode", stalledState.warningCode === "drift_stalled");
+  ok("PtyService drift → stalled warningMessage has seconds", /61s|60s/.test(stalledState.warningMessage));
+  ok(
+    "PtyService drift → emits observer.notice",
+    driftEvents.some((entry) => entry.type === "observer.notice" && entry.payload?.kind === "drift_stalled"),
+  );
+
+  driftState.status = "idle";
+  driftState.readyForPrompt = true;
+  driftState.lastOutputAt = Date.now() - 121000;
+  driftState.lastObserverNoticeKey = "";
+  const idleState = ptyDrift.getAgentTerminalState("gemini", workspaceDrift.id);
+  ok("PtyService drift → idle warningCode", idleState.warningCode === "drift_idle");
+  ptyDrift.stopAll();
+  fs.rmSync(driftDir, { recursive: true, force: true });
+}
+
+{
   const createdSessions = [];
   const runPrompts = [];
   const replies = [];
@@ -686,6 +990,72 @@ section("10. AgentBridge 単体テスト");
   ok("Discord plain message on bound workspace → uses bound workspace", runPrompts[0]?.workspaceId === "ws-discord");
   ok("Discord plain message on bound workspace → does not create legacy session", createdSessions.length === 0);
   ok("Discord plain message on bound workspace → reacts success", reacted.includes("\u2611"));
+}
+
+{
+  const runPrompts = [];
+  const remoteCommands = [];
+  const replies = [];
+  const reacted = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ workspaceId: "ws-discord-slash", defaultAgent: null }),
+      getWorkspace: (workspaceId) => (workspaceId === "ws-discord-slash" ? { id: "ws-discord-slash", name: "workspace-slash" } : null),
+      getWorkspaceParentAgent: () => "gemini",
+      runPrompt: async (payload) => {
+        runPrompts.push(payload);
+        return { text: "ok", usage: {} };
+      },
+      sendRemoteCommand: async (...args) => {
+        remoteCommands.push(args);
+        return { ok: true, finalStatus: "running" };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => (name === "gemini" ? { name: "gemini", model: "gemini-2.5-flash" } : null),
+    },
+  });
+  const message = {
+    content: "/help",
+    channelId: "discord-channel-slash",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-slash",
+    channel: {
+      id: "discord-channel-slash",
+      name: "workspace-slash",
+      send: async () => null,
+    },
+    reply: async (content) => {
+      replies.push(content);
+      return null;
+    },
+    react: async (emoji) => {
+      reacted.push(emoji);
+      return null;
+    },
+  };
+  await adapter.handleMessage(message);
+  ok("Discord slash passthrough routes to shared PTY remote command", remoteCommands[0]?.[2] === "/help");
+  ok("Discord slash passthrough does not call runPrompt", runPrompts.length === 0);
+  ok("Discord slash passthrough replies with routing notice", replies.some((text) => String(text).includes("shared PTY")));
+  ok("Discord slash passthrough reacts success", reacted.includes("\u2611"));
 }
 
 {
@@ -890,7 +1260,7 @@ section("10. AgentBridge 単体テスト");
   await adapter.handleMessage(message);
   ok("Discord plain message without binding → no AgentBridge.runPrompt", runPrompts.length === 0);
   ok("Discord plain message without binding → no legacy session auto-create", createdSessions.length === 0);
-  ok("Discord plain message without binding → shows binding guidance", replies.some((line) => String(line).includes("workspace? <名前>")));
+  ok("Discord plain message without binding → shows binding guidance", replies.some((line) => String(line).includes("workspace! <名前>")));
 }
 
 {
@@ -936,7 +1306,7 @@ section("10. AgentBridge 単体テスト");
     },
   });
   const message = {
-    content: "!new",
+    content: "new!",
     channelId: "discord-channel-3",
     guildId: "guild-1",
     attachments: new Map(),
@@ -949,10 +1319,10 @@ section("10. AgentBridge 単体テスト");
     react: async () => null,
   };
   await adapter.handleMessage(message);
-  ok("Discord !new without binding → creates workspace", createdWorkspaces.length === 1);
-  ok("Discord !new without binding → reuses active workspace parent agent", createdWorkspaces[0]?.parentAgent === "gemini2");
-  ok("Discord !new without binding → binds new workspace to channel", boundChannels[0]?.discordChannelId === "discord-channel-3" && boundChannels[0]?.workspaceId === "ws-new");
-  ok("Discord !new without binding → confirms workspace creation", replies.some((line) => String(line).includes("Started a new workspace")));
+  ok("Discord new! without binding → creates workspace", createdWorkspaces.length === 1);
+  ok("Discord new! without binding → reuses active workspace parent agent", createdWorkspaces[0]?.parentAgent === "gemini2");
+  ok("Discord new! without binding → binds new workspace to channel", boundChannels[0]?.discordChannelId === "discord-channel-3" && boundChannels[0]?.workspaceId === "ws-new");
+  ok("Discord new! without binding → confirms workspace creation", replies.some((line) => String(line).includes("Started a new workspace")));
 }
 
 {
@@ -998,7 +1368,7 @@ section("10. AgentBridge 単体テスト");
     },
   });
   const message = {
-    content: "workspace? ml003actual",
+    content: "workspace! ml003actual",
     channelId: "discord-channel-ml003",
     guildId: "guild-1",
     attachments: new Map(),
@@ -1011,10 +1381,546 @@ section("10. AgentBridge 単体テスト");
     react: async () => null,
   };
   await adapter.handleMessage(message);
-  ok("Discord workspace? create without binding → creates workspace", createdWorkspaces.length === 1);
-  ok("Discord workspace? create without binding → reuses active workspace parent agent", createdWorkspaces[0]?.parentAgent === "gemini2");
-  ok("Discord workspace? create without binding → binds new workspace to channel", boundChannels[0]?.discordChannelId === "discord-channel-ml003" && boundChannels[0]?.workspaceId === "ws-created");
-  ok("Discord workspace? create without binding → confirms workspace creation", replies.some((line) => String(line).includes("Started a new workspace")));
+  ok("Discord workspace! create without binding → creates workspace", createdWorkspaces.length === 1);
+  ok("Discord workspace! create without binding → reuses active workspace parent agent", createdWorkspaces[0]?.parentAgent === "gemini2");
+  ok("Discord workspace! create without binding → binds new workspace to channel", boundChannels[0]?.discordChannelId === "discord-channel-ml003" && boundChannels[0]?.workspaceId === "ws-created");
+  ok("Discord workspace! create without binding → confirms workspace creation", replies.some((line) => String(line).includes("Started a new workspace")));
+}
+
+{
+  const replies = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-status", workspaceId: "ws-status", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-status", name: "status-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [
+        { agentName: "gemini", isParent: true },
+        { agentName: "claude", isParent: false },
+      ],
+      getAgentTerminalState: (agentName) => (
+        agentName === "gemini"
+          ? {
+              status: "waiting_input",
+              hasProcess: true,
+              readyForPrompt: false,
+              lastOutputAt: Date.now() - 5000,
+              warningCode: "drift_stalled",
+            }
+          : { status: "idle", hasProcess: true, readyForPrompt: true, lastOutputAt: Date.now() - 60000 }
+      ),
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini", "claude"],
+      list: () => [
+        { name: "gemini", type: "gemini", model: "gemini-2.5-flash" },
+        { name: "claude", type: "claude", model: "claude-sonnet-4.5" },
+      ],
+      get: (name) => ({ name }),
+    },
+  });
+  adapter.workspacePromptQueues.set(adapter.getWorkspacePromptQueueKey("ws-status", "gemini"), {
+    tail: Promise.resolve(),
+    pendingCount: 3,
+  });
+  const message = {
+    content: "status!",
+    channelId: "discord-channel-status",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-status",
+    channel: { id: "discord-channel-status", name: "status-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord status! → shows workspace name", replies.some((line) => String(line).includes("Workspace: status-workspace")));
+  ok("Discord status! → shows waiting_input state", replies.some((line) => String(line).includes("status=waiting_input")));
+  ok("Discord status! → shows queued turns", replies.some((line) => String(line).includes("queue=2")));
+  ok("Discord status! → shows drift warning", replies.some((line) => String(line).includes("warning=drift_stalled")));
+}
+
+{
+  const replies = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-output", workspaceId: "ws-output", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-output", name: "output-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      getAgentTerminalOutput: () => ({
+        status: "waiting_input",
+        hasProcess: true,
+        text: "line 1\nline 2",
+        totalLineCount: 2,
+        lineLimit: 50,
+        truncated: false,
+      }),
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "output!",
+    channelId: "discord-channel-output",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-output",
+    channel: { id: "discord-channel-output", name: "output-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord output! → shows output header", replies.some((line) => String(line).includes("Latest PTY output: gemini")));
+  ok("Discord output! → includes latest PTY lines", replies.some((line) => String(line).includes("> line 1")));
+}
+
+{
+  const replies = [];
+  const sentInputs = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-enter", workspaceId: "ws-enter", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-enter", name: "enter-workspace", workdir: "C:\\workdir" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      sendTerminalInput: (agentName, workspaceId, data) => {
+        sentInputs.push({ agentName, workspaceId, data });
+        return { ok: true, state: { status: "running" } };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "enter!",
+    channelId: "discord-channel-enter",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-enter",
+    channel: { id: "discord-channel-enter", name: "enter-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord enter! → sends carriage return to PTY", sentInputs[0]?.agentName === "gemini" && sentInputs[0]?.workspaceId === "ws-enter" && sentInputs[0]?.data === "\r");
+  ok("Discord enter! → confirms send", replies.some((line) => String(line).includes("Enter を送信しました")));
+}
+
+{
+  const replies = [];
+  const approvalDecisions = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-approval", workspaceId: "ws-approval", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-approval", name: "approval-workspace", workdir: "C:\\workdir" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      respondToApproval: (agentName, workspaceId, decision) => {
+        approvalDecisions.push({ agentName, workspaceId, decision });
+        return { ok: true, state: { status: "running" } };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "approve!",
+    channelId: "discord-channel-approval",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-approval",
+    channel: { id: "discord-channel-approval", name: "approval-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord approve! → forwards approval decision", approvalDecisions[0]?.decision === "approve");
+  ok("Discord approve! → confirms send", replies.some((line) => String(line).includes("approve を送信しました")));
+}
+
+{
+  const replies = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-bindings", workspaceId: "ws-bindings", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-bindings", name: "bindings-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      listResumeBindings: () => [{ agentName: "gemini", providerSessionRef: "session-123", bindingStatus: "valid" }],
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "bindings!",
+    channelId: "discord-channel-bindings",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-bindings",
+    channel: { id: "discord-channel-bindings", name: "bindings-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord bindings! → shows session ref", replies.some((line) => String(line).includes("session-123")));
+}
+
+{
+  const replies = [];
+  const resumeCalls = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-resume", workspaceId: "ws-resume", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-resume", name: "resume-workspace", workdir: "C:\\workdir" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      resumeAgentSession: async (agentName, workspaceId) => {
+        resumeCalls.push({ agentName, workspaceId });
+        return { resumed: true, terminalState: { status: "waiting_input" } };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "resume!",
+    channelId: "discord-channel-resume",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-resume",
+    channel: { id: "discord-channel-resume", name: "resume-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord resume! → calls resumeAgentSession", resumeCalls[0]?.agentName === "gemini" && resumeCalls[0]?.workspaceId === "ws-resume");
+  ok("Discord resume! → confirms resume", replies.some((line) => String(line).includes("resume しました")));
+}
+
+{
+  const replies = [];
+  const restartCalls = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-restart", workspaceId: "ws-restart", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-restart", name: "restart-workspace", workdir: "C:\\workdir" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      restartAgent: async (agentName, workspaceId) => {
+        restartCalls.push({ agentName, workspaceId });
+        return { terminalState: { status: "waiting_input" } };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "restart!",
+    channelId: "discord-channel-restart",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-restart",
+    channel: { id: "discord-channel-restart", name: "restart-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord restart! → calls restartAgent", restartCalls[0]?.agentName === "gemini" && restartCalls[0]?.workspaceId === "ws-restart");
+  ok("Discord restart! → confirms restart", replies.some((line) => String(line).includes("再起動しました")));
+}
+
+{
+  const replies = [];
+  const checkpointCalls = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-checkpoints", workspaceId: "ws-checkpoints", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-checkpoints", name: "checkpoints-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      createWorkspaceCheckpoint: (workspaceId, options) => {
+        checkpointCalls.push({ workspaceId, options });
+        return { id: "cp-1" };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "checkpoints! create nightly",
+    channelId: "discord-channel-checkpoints",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-checkpoints",
+    channel: { id: "discord-channel-checkpoints", name: "checkpoints-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord checkpoints! create → calls createWorkspaceCheckpoint", checkpointCalls[0]?.workspaceId === "ws-checkpoints" && checkpointCalls[0]?.options?.label === "nightly");
+  ok("Discord checkpoints! create → confirms checkpoint", replies.some((line) => String(line).includes("cp-1")));
+}
+
+{
+  const replies = [];
+  const rollbackCalls = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-rollback", workspaceId: "ws-rollback", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-rollback", name: "rollback-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      previewWorkspaceRollback: (workspaceId, checkpointId) => {
+        rollbackCalls.push({ workspaceId, checkpointId });
+        return { blocked: false, reasons: [] };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "rollback! preview cp-1",
+    channelId: "discord-channel-rollback",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-rollback",
+    channel: { id: "discord-channel-rollback", name: "rollback-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord rollback! preview → calls previewWorkspaceRollback", rollbackCalls[0]?.workspaceId === "ws-rollback" && rollbackCalls[0]?.checkpointId === "cp-1");
+  ok("Discord rollback! preview → shows preview header", replies.some((line) => String(line).includes("Preview: cp-1")));
+}
+
+{
+  const replies = [];
+  const skillCalls = [];
+  const adapter = new DiscordAdapter({
+    bridge: {
+      createSession: () => ({ id: "legacy-session" }),
+      findSessionByDiscordChannel: () => null,
+    },
+    agentBridge: {
+      getDiscordBinding: () => ({ discordChannelId: "discord-channel-skills", workspaceId: "ws-skills", defaultAgent: "gemini" }),
+      getWorkspace: () => ({ id: "ws-skills", name: "skills-workspace" }),
+      getWorkspaceParentAgent: () => "gemini",
+      listWorkspaceAgents: () => [{ agentName: "gemini", isParent: true }],
+      applyWorkspaceSkillSync: (workspaceId, options) => {
+        skillCalls.push({ workspaceId, options });
+        return { changes: [{ action: "copy", target: ".gemini\\skills\\workspace-overview.md" }] };
+      },
+    },
+    bus: { on: () => () => {} },
+    config: {
+      codexWorkdir: process.cwd(),
+      discordAllowedGuildIds: new Set(),
+      discordAllowedChannelIds: new Set(),
+    },
+    attachments: {
+      saveDiscordAttachments: async () => [],
+    },
+    agentRegistry: {
+      hasAgents: () => true,
+      names: () => ["gemini"],
+      list: () => [{ name: "gemini", type: "gemini", model: "gemini-2.5-flash" }],
+      get: (name) => ({ name }),
+    },
+  });
+  const message = {
+    content: "skills! apply gemini",
+    channelId: "discord-channel-skills",
+    guildId: "guild-1",
+    attachments: new Map(),
+    id: "discord-message-skills",
+    channel: { id: "discord-channel-skills", name: "skills-channel", send: async () => null },
+    reply: async (content) => {
+      replies.push(content);
+      return { edit: async () => null, delete: async () => null };
+    },
+    react: async () => null,
+  };
+  await adapter.handleMessage(message);
+  ok("Discord skills! apply → calls applyWorkspaceSkillSync", skillCalls[0]?.workspaceId === "ws-skills" && skillCalls[0]?.options?.agentName === "gemini");
+  ok("Discord skills! apply → confirms sync", replies.some((line) => String(line).includes("skill sync を適用しました")));
 }
 
 // ── 11. API エラーケース ───────────────────────────────────────────────────
@@ -1022,7 +1928,7 @@ section("10. AgentBridge 単体テスト");
 section("11. REST API エラーケース");
 
 // HTTP helpers
-function request(method, url, body) {
+function request(method, url, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const opts = new URL(url);
@@ -1032,6 +1938,7 @@ function request(method, url, body) {
       path: opts.pathname + opts.search,
       method,
       headers: {
+        ...extraHeaders,
         ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}),
       },
     }, (res) => {
@@ -1043,6 +1950,127 @@ function request(method, url, body) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+{
+  let prepareCalls = 0;
+  let runCalls = 0;
+  const isolatedServer = createHttpServer({
+    config: {
+      uiDir: path.resolve("ui"),
+      uploadsDir: path.resolve("uploads"),
+      xtermDir: path.resolve("node_modules/xterm"),
+      xtermAddonFitPath: path.resolve("node_modules/@xterm/addon-fit/lib/addon-fit.js"),
+    },
+    bridge: {
+      getRuntimeInfo() {
+        return {};
+      },
+      listSessions() {
+        return [];
+      },
+    },
+    agentBridge: {
+      store: {
+        getWorkspace(id) {
+          return id === "ws-http" ? { id: "ws-http", name: "http-test" } : null;
+        },
+      },
+      getActiveWorkspace() {
+        return null;
+      },
+      async preparePrompt() {
+        prepareCalls += 1;
+        return {
+          agent: { name: "gemini", type: "gemini", settings: {} },
+          workspace: { id: "ws-http", name: "http-test" },
+          effectiveWorkdir: process.cwd(),
+        };
+      },
+      async runPrompt() {
+        runCalls += 1;
+        throw new Error("Terminal に未送信の入力があります。Enter で送信するか Ctrl+C で取り消してから再送してください。");
+      },
+    },
+    bus: { on() {}, publish() {} },
+    discord: null,
+    attachments: null,
+    scheduler: {
+      listJobs() {
+        return [];
+      },
+    },
+    restartServer: async () => {},
+    ptyService: null,
+  });
+  await new Promise((resolve) => isolatedServer.listen(0, "127.0.0.1", resolve));
+  const isolatedPort = isolatedServer.address().port;
+  const isolatedBase = `http://127.0.0.1:${isolatedPort}`;
+  const slashFailure = await request("POST", `${isolatedBase}/api/agents/gemini/run`, {
+    prompt: "/help",
+    workspaceId: "ws-http",
+    inputMode: "slash_command",
+  });
+  ok("HTTP slash_command failure returns conflict instead of false success", slashFailure.status === 409);
+  ok("HTTP slash_command failure still runs awaited prompt path", prepareCalls === 1 && runCalls === 1);
+  await new Promise((resolve) => isolatedServer.close(resolve));
+}
+
+{
+  let checkpointCalls = 0;
+  const isolatedServer = createHttpServer({
+    config: {
+      uiDir: path.resolve("ui"),
+      uploadsDir: path.resolve("uploads"),
+      xtermDir: path.resolve("node_modules/xterm"),
+      xtermAddonFitPath: path.resolve("node_modules/@xterm/addon-fit/lib/addon-fit.js"),
+      apiAuth: {
+        token: "test-token",
+        allowLoopback: false,
+      },
+    },
+    bridge: {
+      getRuntimeInfo() {
+        return {};
+      },
+      listSessions() {
+        return [];
+      },
+    },
+    agentBridge: {
+      getWorkspace(id) {
+        return id === "ws-http-auth" ? { id: "ws-http-auth", name: "http-auth" } : null;
+      },
+      createWorkspaceCheckpoint() {
+        checkpointCalls += 1;
+        return { id: "cp-auth-1" };
+      },
+    },
+    bus: { on() {}, publish() {} },
+    discord: null,
+    attachments: null,
+    scheduler: {
+      listJobs() {
+        return [];
+      },
+    },
+    restartServer: async () => {},
+    ptyService: null,
+  });
+  await new Promise((resolve) => isolatedServer.listen(0, "127.0.0.1", resolve));
+  const isolatedPort = isolatedServer.address().port;
+  const isolatedBase = `http://127.0.0.1:${isolatedPort}`;
+  const denied = await request("POST", `${isolatedBase}/api/workspaces/ws-http-auth/checkpoints`, { label: "auth-test" });
+  ok("Sensitive checkpoint POST without token → 403", denied.status === 403);
+  const allowed = await request(
+    "POST",
+    `${isolatedBase}/api/workspaces/ws-http-auth/checkpoints`,
+    { label: "auth-test" },
+    { Authorization: "Bearer test-token" },
+  );
+  ok("Sensitive checkpoint POST with bearer token → 201", allowed.status === 201);
+  ok("Sensitive checkpoint POST with bearer token → handler called", checkpointCalls === 1);
+  await new Promise((resolve) => isolatedServer.close(resolve));
 }
 
 const PORT = 4300 + Math.floor(Math.random() * 1000);
@@ -1129,18 +2157,6 @@ if (serverReady) {
     ok("GET /api/agents/nobody/messages → 200 []", r.status === 200 && Array.isArray(r.json()));
   }
 
-  // GET /api/cost?period=today
-  {
-    const r = await request("GET", `${BASE}/api/cost?period=today`);
-    ok("GET /api/cost?period=today → 200", r.status === 200);
-  }
-
-  // GET /api/cost?period=week
-  {
-    const r = await request("GET", `${BASE}/api/cost?period=week`);
-    ok("GET /api/cost?period=week → 200", r.status === 200);
-  }
-
   // Health response shape
   {
     const r = await request("GET", `${BASE}/api/health`);
@@ -1148,11 +2164,21 @@ if (serverReady) {
     ok("health response has ok field", "ok" in j);
   }
 
+  {
+    const patchGlobalMemory = await request("PATCH", `${BASE}/api/memory/global`, { content: "global note" });
+    const getGlobalMemory = await request("GET", `${BASE}/api/memory/global`);
+    ok("PATCH /api/memory/global → 200", patchGlobalMemory.status === 200);
+    ok("GET /api/memory/global → returns saved content", getGlobalMemory.json()?.content === "global note");
+  }
+
   // Create workspace then try to activate it
   {
     const agentsResponse = await request("GET", `${BASE}/api/agents`);
     const liveAgentList = Array.isArray(agentsResponse.json()) ? agentsResponse.json() : [];
     const parentAgent = liveAgentList[0]?.name;
+    const tempWorkspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "multiCLI-discord-base-http-workspace-"));
+    const tempViewerPath = path.join(tempWorkspaceDir, "viewer-note.txt");
+    fs.writeFileSync(tempViewerPath, "alpha\nbeta\n", "utf8");
     if (parentAgent) {
       const missingList = await request("GET", `${BASE}/api/workspaces/does-not-exist/agents`);
       ok("GET /api/workspaces/non-existent/agents → 404", missingList.status === 404);
@@ -1163,7 +2189,7 @@ if (serverReady) {
     const create = await request(
       "POST",
       `${BASE}/api/workspaces`,
-      parentAgent ? { name: "edge-case-ws", parentAgent } : { name: "edge-case-ws" }
+      parentAgent ? { name: "edge-case-ws", parentAgent, workdir: tempWorkspaceDir } : { name: "edge-case-ws", workdir: tempWorkspaceDir }
     );
     ok("create edge-case-ws → 201", create.status === 201);
     const wsId = create.json()?.id;
@@ -1171,10 +2197,58 @@ if (serverReady) {
       const members = await request("GET", `${BASE}/api/workspaces/${wsId}/agents`);
       ok("GET /api/workspaces/:id/agents → 200", members.status === 200 && Array.isArray(members.json()));
 
+      const workspaceMemoryPatch = await request("PATCH", `${BASE}/api/memory/workspaces/${wsId}`, {
+        content: "workspace note",
+      });
+      const workspaceMemoryGet = await request("GET", `${BASE}/api/memory/workspaces/${wsId}`);
+      ok("PATCH /api/memory/workspaces/:id → 200", workspaceMemoryPatch.status === 200);
+      ok("GET /api/memory/workspaces/:id → saved content", workspaceMemoryGet.json()?.content === "workspace note");
+
+      const fileViewer = await request("GET", `${BASE}/api/files/view?path=${encodeURIComponent(tempViewerPath)}`);
+      ok("GET /api/files/view → 200", fileViewer.status === 200);
+      ok("GET /api/files/view → first line", fileViewer.json()?.lines?.[0]?.text === "alpha");
+
+      const bindings = await request("GET", `${BASE}/api/workspaces/${wsId}/bindings`);
+      ok("GET /api/workspaces/:id/bindings → 200", bindings.status === 200 && Array.isArray(bindings.json()));
+
+      const terminalStates = await request("GET", `${BASE}/api/workspaces/${wsId}/terminal-states`);
+      ok("GET /api/workspaces/:id/terminal-states → 200", terminalStates.status === 200 && Array.isArray(terminalStates.json()));
+
+      const checkpoints = await request("GET", `${BASE}/api/workspaces/${wsId}/checkpoints`);
+      ok("GET /api/workspaces/:id/checkpoints → 200", checkpoints.status === 200 && Array.isArray(checkpoints.json()));
+
+      const audits = await request("GET", `${BASE}/api/workspaces/${wsId}/audits`);
+      ok("GET /api/workspaces/:id/audits → 200", audits.status === 200 && Array.isArray(audits.json()));
+
+      const consolidationPreview = await request("GET", `${BASE}/api/workspaces/${wsId}/memory/consolidation/preview`);
+      ok("GET /api/workspaces/:id/memory/consolidation/preview → 200", consolidationPreview.status === 200);
+      ok("GET /api/workspaces/:id/memory/consolidation/preview → scope=workspace", consolidationPreview.json()?.scope === "workspace");
+
+      const diaryPreview = await request("GET", `${BASE}/api/workspaces/${wsId}/memory/diary/preview`);
+      ok("GET /api/workspaces/:id/memory/diary/preview → 200", diaryPreview.status === 200);
+      ok("GET /api/workspaces/:id/memory/diary/preview → scope=diary", diaryPreview.json()?.scope === "diary");
+
+      const skillsRegistry = await request("GET", `${BASE}/api/skills/registry`);
+      ok("GET /api/skills/registry → 200", skillsRegistry.status === 200);
+      ok("GET /api/skills/registry → has skillCount", Number.isFinite(skillsRegistry.json()?.skillCount));
+
+      const skillPlan = await request("POST", `${BASE}/api/workspaces/${wsId}/skills/sync`, {});
+      ok("POST /api/workspaces/:id/skills/sync → 200", skillPlan.status === 200);
+      ok("POST /api/workspaces/:id/skills/sync → plans array", Array.isArray(skillPlan.json()?.plans));
+
       const childAgent = liveAgentList.find((agent) => agent.name !== parentAgent)?.name;
       if (childAgent) {
         const addChild = await request("POST", `${BASE}/api/workspaces/${wsId}/agents`, { agentName: childAgent });
         ok("POST /api/workspaces/:id/agents → 201", addChild.status === 201);
+      }
+
+      if (parentAgent) {
+        const agentMemoryPatch = await request("PATCH", `${BASE}/api/memory/agents/${encodeURIComponent(parentAgent)}`, {
+          content: "agent note",
+        });
+        const agentMemoryGet = await request("GET", `${BASE}/api/memory/agents/${encodeURIComponent(parentAgent)}`);
+        ok("PATCH /api/memory/agents/:name → 200", agentMemoryPatch.status === 200);
+        ok("GET /api/memory/agents/:name → saved content", agentMemoryGet.json()?.content === "agent note");
       }
 
       const activate = await request("POST", `${BASE}/api/workspaces/${wsId}/activate`, {});
@@ -1233,51 +2307,6 @@ await new Promise((resolve) => {
   serverProc.once("exit", () => resolve());
 });
 fs.rmSync(tempDataDir, { recursive: true, force: true });
-
-// ── 12. periodToSince ─────────────────────────────────────────────────────
-
-section("12. periodToSince (コスト期間フィルター)");
-
-// We test via AgentBridge.getCostSummary which internally calls periodToSince
-// Seed a store with old and new runs, verify period filters correctly
-{
-  const db3 = createDatabase(":memory:", {});
-  const store3 = new Store(db3);
-  const registry3 = {
-    setStore() {},
-    switchWorkspace() {},
-    list: () => [],
-    get: () => null,
-  };
-  const ab3 = new AgentBridge({ agentRegistry: registry3, store: store3, bus: { publish: () => {} }, config: { codexWorkdir: process.cwd() } });
-
-  store3.upsertAgent({ name: "gamma", type: "claude", model: "claude-sonnet-4-6" });
-  const ws3 = store3.createWorkspace({ name: "gamma-ws" });
-
-  // Insert a run that "happened" recently (real time)
-  const run = store3.startRun({ agentName: "gamma", workspaceId: ws3.id, prompt: "test", source: "test" });
-  store3.completeRun(run.id, { status: "completed", inputTokens: 100, outputTokens: 50, costUsd: 0.001 });
-
-  // "all" period should include it
-  const all = ab3.getCostSummary({ period: "all" });
-  ok("periodToSince all → includes recent run", all.length === 1);
-
-  // "today" should also include it (run just happened)
-  const today = ab3.getCostSummary({ period: "today" });
-  ok("periodToSince today → includes recent run", today.length === 1);
-
-  // "week" should include it
-  const week = ab3.getCostSummary({ period: "week" });
-  ok("periodToSince week → includes recent run", week.length === 1);
-
-  // "month" should include it
-  const month = ab3.getCostSummary({ period: "month" });
-  ok("periodToSince month → includes recent run", month.length === 1);
-
-  // Invalid period → treated as all
-  const invalid = ab3.getCostSummary({ period: "decade" });
-  ok("periodToSince invalid → all (includes run)", invalid.length === 1);
-}
 
 // ── 13. Gemini transcript sanitize ──────────────────────────────────────────
 
@@ -1445,6 +2474,172 @@ section("13. Gemini transcript sanitize");
   );
 }
 {
+  const prompt = "Reply exactly this line:\n日本語MIX_OK 😀 `code` https://example.com/path?q=1&x=2 **bold** § ※";
+  const sanitized = ptyTestHooks.sanitizeGeminiTranscript(
+    [
+      "User:",
+      "[User prompt]",
+      prompt,
+      "Model: 日本語MIX_OK 😀 code https://example.com/pathq=1&x=2 bold § ※",
+      "Type your message or @path/to/file",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Gemini sanitize restores exact mixed-character line when the rendered transcript only dropped markdown punctuation",
+    sanitized === "日本語MIX_OK 😀 `code` https://example.com/path?q=1&x=2 **bold** § ※",
+  );
+}
+{
+  const prompt = `Reply only H203R_OK ${Array.from({ length: 24 }, (_, index) => `hf-${String(index + 1).padStart(4, "0")}`).join(" ")}`;
+  const wrappedEcho = prompt.replace(/ /g, "\n");
+  const stripped = ptyTestHooks.stripPromptEcho(
+    [
+      "responding…",
+      wrappedEcho,
+      "Type your message or @path/to/file",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Gemini prompt echo stripping removes whitespace-wrapped long single-line echoes before ready-return heuristics run",
+    !stripped.includes("H203R_OK") && stripped.includes("Type your message or @path/to/file"),
+  );
+}
+{
+  const target = `H203RECOVER_OK ${Array.from({ length: 12 }, (_, index) => `hr-${String(index + 1).padStart(4, "0")}`).join(" ")}`;
+  const prompt = `Reply only ${target}`;
+  const sanitized = ptyTestHooks.sanitizeGeminiTranscript(
+    [
+      "User:",
+      "[User prompt]",
+      prompt,
+      "workspace (/directory)",
+      "~\\Desktop\\AI\\repos\\github\\harunamitrader\\multiCLI-discord-base branch",
+      `main sandbox ${prompt}`,
+      "Type your message or @path/to/file",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Gemini sanitize recovers the exact single-line target from a Reply only prompt even when prompt echo and scaffold text contaminate the transcript",
+    sanitized === target,
+  );
+}
+{
+  const prompt = "Reply with exactly these two lines:\nCODEX_ML_A\nCODEX_ML_B";
+  const sanitized = ptyTestHooks.sanitizeCodexTranscript(
+    [
+      "› Say CODEX_ROUTE",
+      "• CODEX_ROUTE",
+      "› gpt-5.4 · ready",
+      "› Reply with exactly these two lines:",
+      "CODEX_ML_A",
+      "CODEX_ML_B",
+      "• CODEX_ML_A",
+      "• CODEX_ML_B",
+      "› gpt-5.4 · ready",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Codex sanitize scopes multiline extraction to the current prompt instead of leaking a prior turn",
+    sanitized === "CODEX_ML_A\nCODEX_ML_B",
+  );
+}
+{
+  const prompt = "Reply with exactly these two lines:\nCODEX_ML_A\nCODEX_ML_B";
+  const shouldWait = ptyTestHooks.codexLooksReadyReturn(
+    [
+      "› Reply with exactly these two lines:",
+      "CODEX_ML_A",
+      "CODEX_ML_B",
+      "• CODEX_ML_A",
+      "› gpt-5.4 · ready",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Codex ready-return does not complete early while an exact multiline target is still incomplete",
+    shouldWait === false,
+  );
+}
+{
+  const prompt = "Reply with exactly these two lines:\nISO_A\nISO_B";
+  const sanitized = ptyTestHooks.sanitizeCodexTranscript(
+    [
+      "› Reply with exactly these two lines:",
+      "ISO_A",
+      "ISO_B",
+      "› Implement {feature}",
+      "gpt-5.4 medium · workspace",
+      "• Working (0s • esc to interrupt)",
+      "ki2",
+      "• ISO_A",
+      "› Implement {feature}",
+      "gpt-5.4 medium · workspace",
+      "ISO_B",
+    ].join("\n"),
+    prompt,
+  );
+  ok(
+    "Codex sanitize recovers an exact multiline target from raw transcript lines even when the second line only survives outside bullet extraction",
+    sanitized === "ISO_A\nISO_B",
+  );
+}
+{
+  const prompt = "Reply with exactly these two lines:\nCODEX_ML_A\nCODEX_ML_B";
+  ok(
+    "Exact reply matcher rejects an incomplete multiline Codex reply",
+    ptyTestHooks.exactReplyMatchesTarget(prompt, "CODEX_ML_A") === false,
+  );
+  ok(
+    "Exact reply matcher accepts a complete multiline Codex reply",
+    ptyTestHooks.exactReplyMatchesTarget(prompt, "CODEX_ML_A\nCODEX_ML_B") === true,
+  );
+}
+{
+  const prompt = "Reply with exactly these two lines:\nCODEX_ML_A\nCODEX_ML_B";
+  const preferred = ptyTestHooks.choosePreferredTranscript(
+    "codex",
+    "CODEX_ML_A",
+    "CODEX_ML_A\nCODEX_ML_B",
+    prompt,
+  );
+  ok(
+    "Transcript chooser prefers the fallback when it covers more lines of an exact multiline target",
+    preferred === "CODEX_ML_A\nCODEX_ML_B",
+  );
+}
+{
+  const sanitized = ptyTestHooks.sanitizeCodexTranscript(
+    [
+      "› Reply with exactly this line:",
+      "CODEX_G3_OK",
+      "• g3",
+      "• CODEX_G3_OK",
+      "› gpt-5.4 · ready",
+    ].join("\n"),
+    "Reply with exactly this line:\nCODEX_G3_OK",
+  );
+  ok(
+    "Codex sanitize drops short model fragments like g3 that can leak ahead of the real reply",
+    sanitized === "CODEX_G3_OK",
+  );
+}
+{
+  const isDetected = ptyTestHooks.isCodexUpdateSelectionPrompt(
+    [
+      "✨ Update available! 0.120.0 -> 0.121.0",
+      "1. Update now (runs `npm install -g @openai/codex`)",
+      "2. Skip",
+      "3. Skip until next version",
+      "Press enter to continue",
+    ].join("\n"),
+  );
+  ok("Codex startup detects the blocking update-selection prompt", isDetected === true);
+}
+{
   const ptyService = new PtyService({
     agentRegistry: {
       get() {
@@ -1480,6 +2675,102 @@ section("13. Gemini transcript sanitize");
 }
 {
   const writes = [];
+  const forwarded = [];
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  ptyService.assertPromptReady = async () => ({ key: "ws-remote:gemini", ptyProc: { id: "pty-1" } });
+  ptyService._forwardTerminalInput = (payload) => {
+    forwarded.push(payload);
+    return payload.ptyProc;
+  };
+  const remoteResult = await ptyService.sendRemoteCommand({
+    agentName: "gemini",
+    workspaceId: "ws-remote",
+    command: "/help",
+    source: "discord-slash",
+    metadata: { inputMode: "slash_command" },
+  });
+  ok("PtyService.sendRemoteCommand forwards slash command text first", forwarded[0]?.data === "/help");
+  ok("PtyService.sendRemoteCommand forwards enter as second write", forwarded[1]?.data === "\r");
+  ok("PtyService.sendRemoteCommand keeps source metadata", forwarded[0]?.source === "discord-slash" && forwarded[0]?.metadata?.inputMode === "slash_command");
+  ok("PtyService.sendRemoteCommand returns running state", remoteResult?.finalStatus === "running");
+}
+{
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const key = "ws-h602:gemini2";
+  const state = ptyService._ensureState(key, "gemini2", "ws-h602");
+  ptyService.ensureAgentPty = () => ({
+    write() {},
+  });
+  state.status = "idle";
+  state.readyForPrompt = true;
+  state.manualInputBuffer = "DRAFT_H602";
+  state.manualInputDirty = true;
+
+  ptyService._handleOutput(key, "Type your message or @path/to/file");
+
+  let busyError = null;
+  try {
+    await ptyService.sendRemoteCommand({
+      agentName: "gemini2",
+      workspaceId: "ws-h602",
+      command: "/help",
+      source: "ui",
+      metadata: { inputMode: "slash_command" },
+    });
+  } catch (error) {
+    busyError = error;
+  }
+
+  ok(
+    "Idle ready redraw preserves terminal draft so slash command remains blocked",
+    state.manualInputDirty === true && state.manualInputBuffer === "DRAFT_H602",
+  );
+  ok(
+    "PtyService.sendRemoteCommand rejects when a preserved terminal draft exists",
+    busyError?.message === "Terminal に未送信の入力があります。Enter で送信するか Ctrl+C で取り消してから再送してください。",
+  );
+}
+{
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const key = "ws-h902:gemini";
+  const state = ptyService._ensureState(key, "gemini", "ws-h902");
+  state.status = "manual_running";
+  state.readyForPrompt = false;
+  state.promptText = "/model";
+  state.manualTurnPersist = true;
+
+  ptyService._handleOutput(
+    key,
+    "Type your message or @path/to/file\nSelect Model\n(Press Esc to close)\n",
+  );
+
+  ok("Gemini selector marks shared PTY as waiting_input", state.status === "waiting_input");
+  ok("Gemini selector keeps readyForPrompt false", state.readyForPrompt === false);
+}
+
+{
+  const writes = [];
   const fakePty = {
     write(value) {
       writes.push(value);
@@ -1507,6 +2798,28 @@ section("13. Gemini transcript sanitize");
   await PtyService.prototype._writePromptToPty.call(
     {},
     fakePty,
+    "Reply with exactly these two lines:\nCODEX_BP_A\nCODEX_BP_B",
+    "codex",
+    { originalPrompt: "Reply with exactly these two lines:\nCODEX_BP_A\nCODEX_BP_B" },
+  );
+  ok(
+    "Codex multiline prompt uses bracketed paste and a second Enter so embedded newlines submit as one turn",
+    writes[0] === "\u001b[200~Reply with exactly these two lines:\rCODEX_BP_A\rCODEX_BP_B\u001b[201~" &&
+      writes[1] === "\r" &&
+      writes[2] === "\r" &&
+      writes.length === 3,
+  );
+}
+{
+  const writes = [];
+  const fakePty = {
+    write(value) {
+      writes.push(value);
+    },
+  };
+  await PtyService.prototype._writePromptToPty.call(
+    {},
+    fakePty,
     "[Context from recent workspace chat]\nold line\n\n[User prompt]\nSay only: DDISC-OK-04",
     "gemini",
     { originalPrompt: "Say only: DDISC-OK-04" },
@@ -1514,6 +2827,194 @@ section("13. Gemini transcript sanitize");
   ok(
     "Gemini context-prefixed single-line prompt still sends a second Enter because the pasted input is multiline",
     writes.filter((value) => value === "\r").length === 2,
+  );
+}
+{
+  const writes = [];
+  const fakePty = {
+    write(value) {
+      writes.push(value);
+    },
+  };
+  await PtyService.prototype._writePromptToPty.call(
+    {},
+    fakePty,
+    "H203_LONG_OK " + "filler ".repeat(120),
+    "gemini",
+    { originalPrompt: "H203_LONG_OK " + "filler ".repeat(120) },
+  );
+  ok(
+    "Gemini long single-line prompt sends a second Enter to flush the composer",
+    writes.filter((value) => value === "\r").length === 2,
+  );
+}
+{
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const key = "ws-h402:gemini2";
+  const state = ptyService._ensureState(key, "gemini2", "ws-h402");
+  state.status = "manual_running";
+  state.readyForPrompt = false;
+  state.promptText = "Count from 1 to 200, one per line, then END_H402B";
+  state.turnActivitySeen = true;
+  state.rawBuffer = [
+    "workspace (/directory)",
+    "C:\\Users\\example\\workspace",
+    "main sandbox",
+  ].join("\n");
+
+  const delays = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = (fn, ms) => {
+    delays.push(ms);
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+  try {
+    ptyService._handleOutput(key, "Type your message or @path/to/file");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+  ok(
+    "Gemini manual turn does not arm completion on a short ready-return scaffold before response text appears",
+    state._completedByReadyReturn === false && delays.length === 0,
+  );
+}
+{
+  const contaminatedTranscript = [
+    "127",
+    "128",
+    "129",
+    "END_H402_POSTFIX",
+    "C workspace (/directory) Count Count from workspace (/directory) Count from 1 to workspace (/directory) Count from 1 to 50, workspace (/directory) Count from 1 to 50, one per li workspace (/directory) Count from 1 to 50, one per line, then END_H402_FA workspace (/directory)",
+    "Type your message or @path/to/file",
+  ].join("\n");
+  ok(
+    "Gemini contaminated manual transcript is recognized as prompt echo noise",
+    ptyTestHooks.transcriptLooksContaminatedByPromptEcho(
+      "gemini",
+      contaminatedTranscript,
+      "Count from 1 to 50, one per line, then END_H402_FAST",
+    ) === true,
+  );
+}
+{
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const key = "ws-h402-stale:gemini2";
+  const state = ptyService._ensureState(key, "gemini2", "ws-h402-stale");
+  state.status = "manual_running";
+  state.readyForPrompt = false;
+  state.promptText = "Count from 1 to 50, one per line, then END_H402_FAST";
+  state.turnActivitySeen = true;
+  state.rawBuffer = [
+    "127",
+    "128",
+    "129",
+    "END_H402_POSTFIX",
+    "C workspace (/directory) Count Count from workspace (/directory) Count from 1 to workspace (/directory) Count from 1 to 50, workspace (/directory) Count from 1 to 50, one per li workspace (/directory) Count from 1 to 50, one per line, then END_H402_FA workspace (/directory)",
+  ].join("\n");
+
+  const delays = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  globalThis.setTimeout = (fn, ms) => {
+    delays.push(ms);
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+  try {
+    ptyService._handleOutput(key, "Type your message or @path/to/file");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+  ok(
+    "Gemini manual turn does not schedule completion on stale transcript plus prompt echo",
+    state._completedByReadyReturn === false && delays.length === 0,
+  );
+}
+{
+  const ptyService = new PtyService({
+    agentRegistry: {
+      get() {
+        return { type: "gemini" };
+      },
+    },
+    config: { codexWorkdir: process.cwd() },
+  });
+  const key = "ws-h403-ctrlc:gemini2";
+  const state = ptyService._ensureState(key, "gemini2", "ws-h403-ctrlc");
+  state.status = "running";
+  state.readyForPrompt = false;
+  state.runId = "run-h403";
+  let cancelledErr = null;
+  state.pendingReject = (err) => {
+    cancelledErr = err;
+  };
+  const oldPty = {
+    writeCalls: [],
+    killed: false,
+    write(data) {
+      this.writeCalls.push(data);
+    },
+    kill() {
+      this.killed = true;
+    },
+  };
+  const newPty = {
+    writeCalls: [],
+    kill() {},
+    write(data) {
+      this.writeCalls.push(data);
+    },
+  };
+  ptyService._ptys.set(key, oldPty);
+  ptyService._scrollback.set(key, "stale output");
+  let respawnCount = 0;
+  ptyService.ensureAgentPty = (agentName, workspaceId) => {
+    respawnCount += 1;
+    ptyService._ptys.set(key, newPty);
+    const nextState = ptyService._ensureState(key, agentName, workspaceId);
+    nextState.status = "starting";
+    nextState.readyForPrompt = false;
+    return newPty;
+  };
+
+  const returnedPty = ptyService._forwardTerminalInput({
+    key,
+    agentName: "gemini2",
+    workspaceId: "ws-h403-ctrlc",
+    workdir: process.cwd(),
+    data: "\u0003",
+    ptyProc: oldPty,
+  });
+
+  ok(
+    "Ctrl+C during running respawns the shared PTY instead of leaving the run stuck",
+    returnedPty === newPty && respawnCount === 1 && ptyService._ptys.get(key) === newPty,
+  );
+  ok(
+    "Ctrl+C during running cancels the pending run and kills the old PTY",
+    oldPty.killed === true && cancelledErr?.cancelled === true && state.runId === null,
+  );
+  ok(
+    "Ctrl+C during running clears stale scrollback and does not write raw input to the old PTY",
+    ptyService._scrollback.get(key) === "" && oldPty.writeCalls.length === 0,
   );
 }
 
@@ -1669,6 +3170,32 @@ section("16. Streaming / Discord sync helpers");
 {
   const suffix = discordTestHooks.getUnsyncedSuffix("Hello world!", "Hello ");
   ok("Discord unsynced suffix removes already-sent prefix", suffix === "world!");
+}
+{
+  const policy = resolveWorkspaceContextPolicy({
+    workspace: { contextInjectionEnabled: null },
+    workspaceAgentCount: 1,
+    requestedIncludeContext: true,
+  });
+  ok("Context policy defaults single-agent workspace to off", policy.effective === false && policy.mode === "default");
+}
+{
+  const contextBlock = buildContextBlock([
+    { role: "user", agentName: "gemini", content: "前回の依頼です" },
+    { role: "assistant", agentName: "gemini", content: "前回の返答です" },
+  ], "gemini");
+  ok("Context block builds compact visible transcript", contextBlock?.messageCount === 2 && contextBlock?.totalChars > 0);
+}
+{
+  const localInput = discordTestHooks.formatLocalInputMessage({
+    text: "/help",
+    metadata: { inputMode: "slash_command" },
+  });
+  ok("Discord local input formatter labels raw slash passthrough", localInput.includes("Mode: / passthrough"));
+}
+{
+  ok("Discord slash helper accepts single-line slash commands", discordTestHooks.isSlashPassthroughInput("/help") === true);
+  ok("Discord slash helper rejects multiline slash input", discordTestHooks.isSlashPassthroughInput("/help\nmore") === false);
 }
 {
   const sentMessages = [];

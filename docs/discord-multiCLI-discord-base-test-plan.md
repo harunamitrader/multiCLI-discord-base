@@ -38,8 +38,8 @@
 | workspace-rebinding | 15 | 1対1 制約での再紐づけ |
 | plain-routing | 15 | plain message の parent agent ルーティング |
 | agent-routing | 15 | `agentName? prompt` の対象 agent ルーティング |
-| command-migration | 15 | slash 廃止後の `!` / `?` command 動作 |
-| legacy-commands | 15 | `!new` など legacy command の互換動作 |
+| command-migration | 15 | slash 廃止後の `command!` / `agentName?` command 動作 |
+| legacy-commands | 15 | `new!` など現行 command 形式の互換確認 |
 | attachment-flow | 15 | 画像・ファイル添付の保存とプロンプト組み立て |
 | terminal-sync | 15 | Discord 入出力が Terminal / PTY と整合するか |
 | chat-persistence | 15 | UI / DB / history への保存 |
@@ -52,8 +52,8 @@
 
 ### 1. workspace-create
 
-- unbound channel で `!new`
-- unbound channel で `workspace? <名前>`
+- unbound channel で `new!`
+- unbound channel で `workspace! <名前>`
 - 既存 channel 名と同名 workspace がある場合の挙動
 - 複数 agent 構成時の parent agent 決定
 
@@ -73,10 +73,10 @@
 
 ### 4. command-migration / legacy-commands
 
-- `!help`
-- `!status`
-- `!new`
-- `workspace? <名前>`
+- `help!`
+- `status!`
+- `new!`
+- `workspace! <名前>`
 - plain message と command を交互に送る複合系
 
 ### 5. attachment-flow
@@ -102,7 +102,7 @@
 - multiCLI-discord-base 再起動後の binding 維持
 - Discord タブ reload 後の継続
 - stale process 混在時の挙動
-- 再起動直後の `!new` / plain prompt
+- 再起動直後の `new!` / plain prompt
 
 ### 8. stress-load
 
@@ -140,29 +140,29 @@
 | --- | --- | --- |
 | discord-live-001 | passed | bound channel `workspace001` で plain prompt → `OK-001` |
 | discord-live-002 | passed | unbound channel `メモ` で plain prompt → 自動作成されず案内表示 |
-| discord-live-003 | failed | 初回 `!new` が複数 agent 構成で parentAgent 決定できず失敗 |
-| discord-live-003-retest | passed | 修正後 `!new` で `メモ` workspace 作成成功 |
-| discord-live-004 | passed | `!new` 後の `メモ` channel で plain prompt → `OK-004` |
+| discord-live-003 | failed | 初回 `new!` が複数 agent 構成で parentAgent 決定できず失敗 |
+| discord-live-003-retest | passed | 修正後 `new!` で `メモ` workspace 作成成功 |
+| discord-live-004 | passed | `new!` 後の `メモ` channel で plain prompt → `OK-004` |
 | discord-live-login-blocked | blocked | 初回は Discord ログイン待ちで停止 |
 
 ## 今回の live で見つかった不具合と対応
 
 ### 不具合
 
-- `!new` が unbound channel で「明示作成コマンド」のはずなのに、複数 agent 構成だと parentAgent を自動決定できず失敗した
+- `new!` が unbound channel で「明示作成コマンド」のはずなのに、複数 agent 構成だと parentAgent を自動決定できず失敗した
 
 ### 対応
 
 - `server\src\discord-adapter.js`
-  - `!new` / `/codex new` の parent agent 解決を改善
+  - `new!` / `/codex new` の parent agent 解決を改善
   - 優先順: 単一 agent → active workspace の parent agent → 既存 workspace 群で一意な parent agent
 
 ### 回帰
 
 - `scripts\test-multiCLI-discord-base-extended.mjs`
-  - `Discord !new without binding → creates workspace`
-  - `Discord !new without binding → reuses active workspace parent agent`
-  - `Discord !new without binding → binds new workspace to channel`
+  - `Discord new! without binding → creates workspace`
+  - `Discord new! without binding → reuses active workspace parent agent`
+  - `Discord new! without binding → binds new workspace to channel`
 
 ## 証跡ファイル
 
@@ -172,6 +172,6 @@
 ## 次のバッチ
 
 1. `workspace-binding` / `workspace-rebinding` を live で消化
-2. `!help` / `!status` / `workspace? <名前>` の live 実行
+2. `help!` / `status!` / `workspace! <名前>` の live 実行
 3. 添付ファイル系と stress-load 系の live 実行
 4. Terminal 本文 / UI partial / Discord partial / working timer の 3 面同期を詰める

@@ -466,10 +466,17 @@ export function loadConfig() {
   const agentsConfigPath = path.join(configDir, "agents.json");
   const dataDir = path.resolve(projectRoot, process.env.DATA_DIR || "data");
   const uiDir = path.resolve(projectRoot, "ui");
-  const uploadsDir = path.join(dataDir, "uploads");
+  const uploadsDir = resolvePathFromProject(
+    process.env.UPLOADS_DIR,
+    path.join(dataDir, "uploads"),
+  );
   const logsDir = path.join(dataDir, "logs");
   const schedulesDir = path.join(dataDir, "schedules");
+  const memoryDir = path.join(dataDir, "memory");
+  const memoryAutomationDir = path.join(dataDir, "memory-automation");
   const scheduleDefaultsPath = path.join(dataDir, "schedule-defaults.json");
+  const skillRegistryPath = path.join(projectRoot, "server", "skills", "registry.yaml");
+  const skillSourceDir = path.join(projectRoot, "server", "skills");
   const availableModels = loadAvailableModels();
   const cliSettings = loadCliSettingsConfig(cliSettingsPath, availableModels);
   const appSettings = loadAppSettingsConfig(appSettingsPath);
@@ -483,6 +490,8 @@ export function loadConfig() {
   const fileWatchEnabled = parseBoolean(process.env.FILE_WATCH_ENABLED, false);
   const fileWatchRoot = parseOptionalString(process.env.FILE_WATCH_ROOT);
   const fileLogChannelId = parseOptionalString(process.env.FILE_LOG_CHANNEL_ID);
+  const apiAuthToken = parseOptionalString(process.env.MULTICLI_API_TOKEN || process.env.API_AUTH_TOKEN);
+  const apiAllowLoopback = parseBoolean(process.env.MULTICLI_API_ALLOW_LOOPBACK, true);
   if (discordBotToken && discordAllowedGuildIds.size !== 1) {
     throw new Error(
       "DISCORD_ALLOWED_GUILD_IDS must contain exactly one guild ID.",
@@ -515,6 +524,8 @@ export function loadConfig() {
   fs.mkdirSync(uploadsDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
   fs.mkdirSync(schedulesDir, { recursive: true });
+  fs.mkdirSync(memoryDir, { recursive: true });
+  fs.mkdirSync(memoryAutomationDir, { recursive: true });
 
   return {
     host: process.env.HOST || "127.0.0.1",
@@ -522,8 +533,13 @@ export function loadConfig() {
     dataDir,
     uploadsDir,
     schedulesDir,
+    memoryDir,
+    memoryAutomationDir,
     scheduleDefaultsPath,
+    skillRegistryPath,
+    skillSourceDir,
     databasePath: path.join(dataDir, "bridge.sqlite"),
+    runtimeStatePath: path.join(dataDir, "state.json"),
     uiDir,
     configDir,
     configFiles: {
@@ -571,5 +587,14 @@ export function loadConfig() {
     fileWatchDebounceMs: appSettings.fileWatch.debounceMs,
     fileWatchMaxAttachmentBytes: appSettings.fileWatch.maxAttachmentBytes,
     fileWatchIgnore: appSettings.fileWatch.ignore,
+    apiAuth: {
+      token: apiAuthToken,
+      allowLoopback: apiAllowLoopback,
+    },
+    driftDetection: {
+      runningSilenceMs: parseOptionalNumber(process.env.MULTICLI_DRIFT_RUNNING_SILENCE_MS, 120000),
+      readySilenceMs: parseOptionalNumber(process.env.MULTICLI_DRIFT_READY_SILENCE_MS, 900000),
+      pollMs: parseOptionalNumber(process.env.MULTICLI_DRIFT_POLL_MS, 15000),
+    },
   };
 }

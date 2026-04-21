@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+const MAX_ACTIVE_WORKSPACES = 5;
+
 // ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------
@@ -67,6 +69,12 @@ function parseWorkspace(row) {
     id: row.id,
     name: row.name,
     workdir: row.workdir,
+    contextInjectionEnabled:
+      row.context_injection_enabled == null
+        ? null
+        : Boolean(row.context_injection_enabled),
+    isSidebarActive: Boolean(row.is_sidebar_active),
+    sortOrder: Number.isFinite(Number(row.sort_order)) ? Number(row.sort_order) : 0,
     isActive: Boolean(row.is_active),
     createdAt: row.created_at,
   };
@@ -123,6 +131,52 @@ function parseDiscordBinding(row) {
     discordChannelId: row.discord_channel_id,
     workspaceId: row.workspace_id,
     defaultAgent: row.default_agent ?? null,
+    createdAt: row.created_at,
+  };
+}
+
+function parseGitCheckpoint(row) {
+  if (!row) return null;
+  let status = { entries: [], dirtyCount: 0, trackedCount: 0, untrackedCount: 0 };
+  try {
+    status = row.status_json ? JSON.parse(row.status_json) : status;
+  } catch {
+    status = { entries: [], dirtyCount: 0, trackedCount: 0, untrackedCount: 0 };
+  }
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    agentName: row.agent_name ?? null,
+    runId: row.run_id ?? null,
+    kind: row.kind,
+    label: row.label ?? "",
+    workdir: row.workdir ?? "",
+    gitHeadSha: row.git_head_sha ?? "",
+    stashRef: row.stash_ref ?? null,
+    status,
+    createdAt: row.created_at,
+  };
+}
+
+function parseOperationAudit(row) {
+  if (!row) return null;
+  let details = {};
+  try {
+    details = row.details_json ? JSON.parse(row.details_json) : {};
+  } catch {
+    details = {};
+  }
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id ?? null,
+    agentName: row.agent_name ?? null,
+    operationType: row.operation_type,
+    targetRef: row.target_ref ?? null,
+    status: row.status,
+    dryRun: Boolean(row.dry_run),
+    requestedBy: row.requested_by ?? null,
+    source: row.source ?? null,
+    details,
     createdAt: row.created_at,
   };
 }
@@ -230,12 +284,18 @@ export class Store {
 
     // ---- Workspace statements ----
     this.insertWorkspaceStatement = db.prepare(`
-      INSERT INTO workspaces (id, name, workdir, is_active, created_at)
-      VALUES (?, ?, ?, ?, datetime('now'))
+      INSERT INTO workspaces (
+        id, name, workdir, context_injection_enabled,
+        is_sidebar_active, sort_order, is_active, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
     `);
     this.getWorkspaceStatement = db.prepare(`SELECT * FROM workspaces WHERE id=?`);
     this.getWorkspaceByNameStatement = db.prepare(`SELECT * FROM workspaces WHERE name=?`);
-    this.listWorkspacesStatement = db.prepare(`SELECT * FROM workspaces ORDER BY name`);
+    this.listWorkspacesStatement = db.prepare(`
+      SELECT * FROM workspaces
+      ORDER BY is_sidebar_active DESC, sort_order ASC, created_at ASC, name ASC
+    `);
     this.getActiveWorkspaceStatement = db.prepare(
       `SELECT * FROM workspaces WHERE is_active=1 LIMIT 1`
     );
@@ -246,8 +306,29 @@ export class Store {
       `UPDATE workspaces SET is_active=0`
     );
     this.updateWorkspaceStatement = db.prepare(
-      `UPDATE workspaces SET name=?, workdir=? WHERE id=?`
+      `UPDATE workspaces
+       SET name=?,
+           workdir=?,
+           context_injection_enabled=?,
+           is_sidebar_active=?,
+           sort_order=?
+       WHERE id=?`
     );
+    this.countSidebarActiveWorkspacesStatement = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM workspaces
+      WHERE is_sidebar_active = 1
+    `);
+    this.maxWorkspaceSortOrderStatement = db.prepare(`
+      SELECT MAX(sort_order) AS max_sort_order
+      FROM workspaces
+      WHERE is_sidebar_active = ?
+    `);
+    this.updateWorkspacePlacementStatement = db.prepare(`
+      UPDATE workspaces
+      SET is_sidebar_active=?, sort_order=?
+      WHERE id=?
+    `);
     this.deleteWorkspaceStatement = db.prepare(`DELETE FROM workspaces WHERE id=?`);
     this.getAppSettingStatement = db.prepare(`SELECT value FROM app_settings WHERE key=?`);
     this.upsertAppSettingStatement = db.prepare(`
@@ -257,6 +338,8 @@ export class Store {
         value=excluded.value,
         updated_at=excluded.updated_at
     `);
+
+    this._normalizeWorkspaceSidebarState();
 
     // ---- AgentSession statements ----
     this.upsertAgentSessionStatement = db.prepare(`
@@ -275,6 +358,9 @@ export class Store {
     this.listAgentSessionsByWorkspaceStatement = db.prepare(
       `SELECT * FROM agent_sessions WHERE workspace_id=?`
     );
+    this.listAllAgentSessionsStatement = db.prepare(
+      `SELECT * FROM agent_sessions ORDER BY updated_at DESC`
+    );
 
     // ---- Run statements ----
     this.insertRunStatement = db.prepare(`
@@ -285,25 +371,16 @@ export class Store {
       UPDATE runs SET status=?, input_tokens=?, output_tokens=?, cost_usd=?, completed_at=datetime('now')
       WHERE id=?
     `);
+    this.recoverRunStatement = db.prepare(`
+      UPDATE runs
+      SET status=?,
+          completed_at=COALESCE(completed_at, datetime('now'))
+      WHERE id=? AND status='running'
+    `);
     this.getRunStatement = db.prepare(`SELECT * FROM runs WHERE id=?`);
     this.listRunsStatement = db.prepare(
       `SELECT * FROM runs WHERE agent_name=? AND workspace_id=? ORDER BY started_at DESC LIMIT ?`
     );
-    this.costSummaryStatement = db.prepare(`
-      SELECT
-        agent_name,
-        COUNT(*) AS run_count,
-        COALESCE(SUM(input_tokens), 0)  AS total_input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
-        COALESCE(SUM(cost_usd), 0)      AS total_cost_usd
-      FROM runs
-      WHERE status='completed'
-        AND (? IS NULL OR agent_name=?)
-        AND (? IS NULL OR workspace_id=?)
-        AND (? IS NULL OR started_at >= ?)
-      GROUP BY agent_name
-      ORDER BY total_cost_usd DESC
-    `);
 
     // ---- Message statements ----
     this.insertMessageStatement = db.prepare(`
@@ -333,6 +410,37 @@ export class Store {
     this.deleteDiscordBindingsByWorkspaceStatement = db.prepare(
       `DELETE FROM workspace_discord_bindings WHERE workspace_id=?`
     );
+
+    // ---- Git checkpoint / audit statements ----
+    this.insertGitCheckpointStatement = db.prepare(`
+      INSERT INTO git_checkpoints (
+        id, workspace_id, agent_name, run_id, kind, label, workdir,
+        git_head_sha, stash_ref, status_json, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    this.getGitCheckpointStatement = db.prepare(
+      `SELECT * FROM git_checkpoints WHERE id=?`
+    );
+    this.listGitCheckpointsByWorkspaceStatement = db.prepare(`
+      SELECT * FROM git_checkpoints
+      WHERE workspace_id=?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
+    this.insertOperationAuditStatement = db.prepare(`
+      INSERT INTO operation_audits (
+        id, workspace_id, agent_name, operation_type, target_ref, status,
+        dry_run, requested_by, source, details_json, created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+    this.listOperationAuditsStatement = db.prepare(`
+      SELECT * FROM operation_audits
+      WHERE (? IS NULL OR workspace_id=?)
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
 
     // ---- Workspace agents statements (PTY-first membership) ----
     this.upsertWorkspaceAgentStatement = db.prepare(`
@@ -540,9 +648,22 @@ export class Store {
   // Workspace methods
   // ---------------------------------------------------------------------------
 
-  createWorkspace({ id, name, workdir }) {
+  createWorkspace({ id, name, workdir, contextInjectionEnabled = null, isSidebarActive = null } = {}) {
     const isFirstWorkspace = this.listWorkspaces().length === 0 ? 1 : 0;
-    this.insertWorkspaceStatement.run(id ?? randomUUID(), name, workdir ?? null, isFirstWorkspace);
+    const resolvedSidebarActive =
+      isSidebarActive == null
+        ? (isFirstWorkspace ? 1 : (this.countSidebarActiveWorkspaces() < MAX_ACTIVE_WORKSPACES ? 1 : 0))
+        : (isSidebarActive ? 1 : 0);
+    const sortOrder = this.getNextWorkspaceSortOrder(Boolean(resolvedSidebarActive));
+    this.insertWorkspaceStatement.run(
+      id ?? randomUUID(),
+      name,
+      workdir ?? null,
+      contextInjectionEnabled == null ? null : (contextInjectionEnabled ? 1 : 0),
+      resolvedSidebarActive,
+      sortOrder,
+      isFirstWorkspace,
+    );
     return parseWorkspace(this.getWorkspaceByNameStatement.get(name));
   }
 
@@ -562,6 +683,17 @@ export class Store {
     return this.listWorkspacesStatement.all().map(parseWorkspace);
   }
 
+  countSidebarActiveWorkspaces() {
+    return Number(this.countSidebarActiveWorkspacesStatement.get()?.count || 0);
+  }
+
+  getNextWorkspaceSortOrder(isSidebarActive) {
+    const row = this.maxWorkspaceSortOrderStatement.get(isSidebarActive ? 1 : 0);
+    if (row?.max_sort_order == null) return 0;
+    const value = Number(row?.max_sort_order);
+    return Number.isFinite(value) ? value + 1 : 0;
+  }
+
   setActiveWorkspace(id) {
     if (!id) {
       this.clearActiveWorkspaceStatement.run();
@@ -571,11 +703,50 @@ export class Store {
     return this.getWorkspace(id);
   }
 
-  updateWorkspace(id, { name, workdir }) {
+  updateWorkspace(id, {
+    name,
+    workdir,
+    contextInjectionEnabled,
+    isSidebarActive,
+    sortOrder,
+  } = {}) {
     const ws = this.getWorkspace(id);
     if (!ws) return null;
-    this.updateWorkspaceStatement.run(name ?? ws.name, workdir ?? ws.workdir, id);
+    this.updateWorkspaceStatement.run(
+      name ?? ws.name,
+      workdir === undefined ? ws.workdir : (workdir ?? null),
+      contextInjectionEnabled === undefined
+        ? (ws.contextInjectionEnabled == null ? null : (ws.contextInjectionEnabled ? 1 : 0))
+        : contextInjectionEnabled == null
+          ? null
+          : (contextInjectionEnabled ? 1 : 0),
+      isSidebarActive === undefined ? (ws.isSidebarActive ? 1 : 0) : (isSidebarActive ? 1 : 0),
+      sortOrder === undefined
+        ? (Number.isFinite(Number(ws.sortOrder)) ? Number(ws.sortOrder) : 0)
+        : Math.max(0, Number(sortOrder) || 0),
+      id,
+    );
     return this.getWorkspace(id);
+  }
+
+  saveWorkspaceLayout(layout = []) {
+    const items = Array.isArray(layout) ? layout : [];
+    this.db.exec("BEGIN");
+    try {
+      for (const item of items) {
+        this.updateWorkspacePlacementStatement.run(
+          item.isSidebarActive ? 1 : 0,
+          Math.max(0, Number(item.sortOrder) || 0),
+          item.id,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this._normalizeWorkspaceSidebarState();
+    return this.listWorkspaces();
   }
 
   deleteWorkspace(id) {
@@ -594,6 +765,7 @@ export class Store {
     this.deleteAgentSessionsByWorkspaceStatement.run(id);
     this.deleteWorkspaceAgentsByWorkspaceStatement.run(id);
     this.deleteWorkspaceStatement.run(id);
+    this._normalizeWorkspaceSidebarState();
     return ws;
   }
 
@@ -630,6 +802,10 @@ export class Store {
     return this.listAgentSessionsByWorkspaceStatement.all(workspaceId).map(parseAgentSession);
   }
 
+  listAllAgentSessions() {
+    return this.listAllAgentSessionsStatement.all().map(parseAgentSession);
+  }
+
   // ---------------------------------------------------------------------------
   // Run methods
   // ---------------------------------------------------------------------------
@@ -651,28 +827,13 @@ export class Store {
     return parseRun(this.getRunStatement.get(id));
   }
 
-  listRuns(agentName, workspaceId, limit = 50) {
-    return this.listRunsStatement.all(agentName, workspaceId, limit).map(parseRun);
+  recoverRun(id, status = "interrupted") {
+    this.recoverRunStatement.run(status ?? "interrupted", id);
+    return parseRun(this.getRunStatement.get(id));
   }
 
-  /**
-   * Aggregate cost summary.
-   * @param {{ agentName?: string, workspaceId?: string, since?: string }} opts  since = ISO date string
-   */
-  getCostSummary({ agentName, workspaceId, since } = {}) {
-    const rows = this.costSummaryStatement.all(
-      agentName ?? null, agentName ?? null,
-      workspaceId ?? null, workspaceId ?? null,
-      since ?? null, since ?? null,
-    );
-    return rows.map((r) => ({
-      agentName: r.agent_name,
-      runCount: r.run_count,
-      totalInputTokens: r.total_input_tokens,
-      totalOutputTokens: r.total_output_tokens,
-      totalCostUsd: r.total_cost_usd,
-      totalCostJpy: Math.round(r.total_cost_usd * 150 * 10) / 10,
-    }));
+  listRuns(agentName, workspaceId, limit = 50) {
+    return this.listRunsStatement.all(agentName, workspaceId, limit).map(parseRun);
   }
 
   // ---------------------------------------------------------------------------
@@ -749,5 +910,123 @@ export class Store {
 
   listDiscordBindingsByWorkspace(workspaceId) {
     return this.listDiscordBindingsByWorkspaceStatement.all(workspaceId).map(parseDiscordBinding);
+  }
+
+  createGitCheckpoint({
+    id,
+    workspaceId,
+    agentName,
+    runId,
+    kind,
+    label,
+    workdir,
+    gitHeadSha,
+    stashRef,
+    status,
+  }) {
+    this.insertGitCheckpointStatement.run(
+      id,
+      workspaceId,
+      agentName ?? null,
+      runId ?? null,
+      kind,
+      label ?? "",
+      workdir ?? null,
+      gitHeadSha ?? null,
+      stashRef ?? null,
+      JSON.stringify(status ?? {}),
+    );
+    return parseGitCheckpoint(this.getGitCheckpointStatement.get(id));
+  }
+
+  getGitCheckpoint(id) {
+    return parseGitCheckpoint(this.getGitCheckpointStatement.get(id));
+  }
+
+  listGitCheckpointsByWorkspace(workspaceId, limit = 20) {
+    return this.listGitCheckpointsByWorkspaceStatement.all(workspaceId, limit).map(parseGitCheckpoint);
+  }
+
+  addOperationAudit({
+    workspaceId = null,
+    agentName = null,
+    operationType,
+    targetRef = null,
+    status,
+    dryRun = false,
+    requestedBy = null,
+    source = null,
+    details = {},
+  }) {
+    const id = randomUUID();
+    this.insertOperationAuditStatement.run(
+      id,
+      workspaceId,
+      agentName,
+      operationType,
+      targetRef,
+      status,
+      dryRun ? 1 : 0,
+      requestedBy,
+      source,
+      JSON.stringify(details ?? {}),
+    );
+    return parseOperationAudit(this.db.prepare(`SELECT * FROM operation_audits WHERE id=?`).get(id));
+  }
+
+  listOperationAudits(workspaceId = null, limit = 50) {
+    return this.listOperationAuditsStatement.all(workspaceId, workspaceId, limit).map(parseOperationAudit);
+  }
+
+  _normalizeWorkspaceSidebarState() {
+    const rows = this.db.prepare(`
+      SELECT id, is_sidebar_active, sort_order, is_active, created_at, name
+      FROM workspaces
+      ORDER BY is_active DESC, created_at ASC, name ASC
+    `).all();
+    if (!rows.length) return;
+
+    const hasSidebarActive = rows.some((row) => Number(row.is_sidebar_active) === 1);
+    const uniqueSortOrders = new Set(rows.map((row) => Number(row.sort_order)).filter(Number.isFinite));
+    const sortLooksUninitialized = uniqueSortOrders.size <= 1;
+
+    const normalizedRows = rows.map((row, index) => ({
+      id: row.id,
+      isSidebarActive: hasSidebarActive
+        ? Boolean(row.is_sidebar_active)
+        : index === 0,
+      sortOrder: sortLooksUninitialized ? index : Math.max(0, Number(row.sort_order) || 0),
+      createdAt: row.created_at,
+      name: row.name,
+    }));
+
+    const byCurrentOrder = (left, right) =>
+      left.sortOrder - right.sortOrder ||
+      String(left.createdAt || "").localeCompare(String(right.createdAt || "")) ||
+      String(left.name || "").localeCompare(String(right.name || ""));
+
+    const active = normalizedRows.filter((row) => row.isSidebarActive).sort(byCurrentOrder);
+    const inactive = normalizedRows.filter((row) => !row.isSidebarActive).sort(byCurrentOrder);
+    const cappedActive = active.slice(0, MAX_ACTIVE_WORKSPACES).map((row, index) => ({
+      ...row,
+      isSidebarActive: true,
+      sortOrder: index,
+    }));
+    const normalizedInactive = [...active.slice(MAX_ACTIVE_WORKSPACES), ...inactive].map((row, index) => ({
+      ...row,
+      isSidebarActive: false,
+      sortOrder: index,
+    }));
+
+    this.db.exec("BEGIN");
+    try {
+      for (const row of [...cappedActive, ...normalizedInactive]) {
+        this.updateWorkspacePlacementStatement.run(row.isSidebarActive ? 1 : 0, row.sortOrder, row.id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }

@@ -39,7 +39,13 @@ const state = {
   deltaBubbles: new Map(),
   // workspaceId:agentName → fallback history sync timer
   messageCatchups: new Map(),
+  sidebarDrag: null,
+  activeBootstrapSignature: "",
+  activeBootstrapPromise: null,
+  pendingActiveBootstrapSignature: "",
 };
+
+const MAX_ACTIVE_WORKSPACES = 5;
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 
@@ -50,6 +56,12 @@ const sessionSidebarEl = $("session-sidebar");
 const chatLogEl = $("chat-log");
 const chatInputEl = $("chat-input");
 const chatRouteHintEl = $("chat-route-hint");
+const chatFileViewerEl = $("chat-file-viewer");
+const chatFileViewerPathEl = $("chat-file-viewer-path");
+const chatFileViewerMetaEl = $("chat-file-viewer-meta");
+const chatFileViewerContentEl = $("chat-file-viewer-content");
+const chatFileViewerOpenEl = $("chat-file-viewer-open");
+const btnChatFileViewerCloseEl = $("btn-chat-file-viewer-close");
 const btnSendEl = $("btn-send");
 const selectedAgentSummaryWrapEl = $("selected-agent-summary");
 const selectedAgentNameEl = $("selected-agent-name");
@@ -72,6 +84,10 @@ const terminalWorkspaceLabelEl = $("terminal-workspace-label");
 const terminalStatusBadgeEl = $("terminal-status-badge");
 const terminalSharedHintEl = $("terminal-shared-hint");
 const terminalConfigWarningEl = $("terminal-config-warning");
+const terminalApprovalBannerEl = $("terminal-approval-banner");
+const terminalApprovalTextEl = $("terminal-approval-text");
+const btnTerminalApproveEl = $("btn-terminal-approve");
+const btnTerminalDenyEl = $("btn-terminal-deny");
 const btnTerminalKill = $("btn-terminal-kill");
 const btnTerminalReconnectEl = $("btn-terminal-reconnect");
 const btnTerminalLayoutSideEl = $("btn-terminal-layout-side");
@@ -101,6 +117,8 @@ const btnTerminalSendEl = $("btn-terminal-send");
 const toastContainerEl = $("toast-container");
 const settingsWorkdirEl = $("settings-workdir");
 const btnSaveWorkdirEl = $("btn-save-workdir");
+const globalMemoryInputEl = $("global-memory-input");
+const btnSaveGlobalMemoryEl = $("btn-save-global-memory");
 const btnSettingsGlobalEl = $("btn-settings-global");
 const btnSettingsSessionEl = $("btn-settings-session");
 const btnSettingsAgentEl = $("btn-settings-agent");
@@ -117,6 +135,10 @@ const sessionNameInputEl = $("session-name-input");
 const sessionWorkdirInputEl = $("session-workdir-input");
 const sessionParentAgentEl = $("session-parent-agent");
 const sessionDiscordChannelEl = $("session-discord-channel");
+const sessionContextModeEl = $("session-context-mode");
+const sessionContextHintEl = $("session-context-hint");
+const sessionMemoryInputEl = $("session-memory-input");
+const btnSaveSessionMemoryEl = $("btn-save-session-memory");
 const btnSessionSaveEl = $("btn-session-save");
 const btnSessionDeleteEl = $("btn-session-delete");
 const agentSettingsSectionEl = $("agent-settings-section");
@@ -139,6 +161,8 @@ const agentPlanModeControlsEl = $("agent-plan-mode-controls");
 const agentPlanModeInputEl = $("agent-plan-mode-input");
 const agentPlanModeHintEl = $("agent-plan-mode-hint");
 const agentInstructionsInputEl = $("agent-instructions-input");
+const agentMemoryInputEl = $("agent-memory-input");
+const btnSaveAgentMemoryEl = $("btn-save-agent-memory");
 const btnAgentSaveEl = $("btn-agent-save");
 const btnAgentDeleteEl = $("btn-agent-delete");
 const agentsListEl = $("agents-list");
@@ -1003,6 +1027,139 @@ function renderAgentMarkdown(content) {
   return blocks.join("") || escHtml(source);
 }
 
+function normalizeLinkedFilePath(rawPath) {
+  let value = String(rawPath ?? "").trim();
+  if (!value) return "";
+  if (/^file:\/\/\//i.test(value)) {
+    value = decodeURIComponent(value.replace(/^file:\/\/\/?/i, ""));
+    value = value.replace(/\//g, "\\");
+  }
+  return value;
+}
+
+function splitLinkTrailingPunctuation(rawValue) {
+  let value = String(rawValue ?? "");
+  let trailing = "";
+  while (/[),.;!?]$/.test(value)) {
+    trailing = value.slice(-1) + trailing;
+    value = value.slice(0, -1);
+  }
+  return { value, trailing };
+}
+
+function createLinkifiedFragment(text) {
+  const fragment = document.createDocumentFragment();
+  const pattern = /(https?:\/\/[^\s<]+|file:\/\/\/[A-Za-z]:[^\s<]+|[A-Za-z]:\\[^\r\n<>"]+)/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const start = match.index;
+    const rawToken = match[0];
+    if (start > lastIndex) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+    }
+    const { value, trailing } = splitLinkTrailingPunctuation(rawToken);
+    if (/^https?:\/\//i.test(value)) {
+      const anchor = document.createElement("a");
+      anchor.className = "msg-link";
+      anchor.href = value;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = value;
+      fragment.appendChild(anchor);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "msg-file-link";
+      button.dataset.filePath = normalizeLinkedFilePath(value);
+      button.textContent = value;
+      fragment.appendChild(button);
+    }
+    if (trailing) {
+      fragment.appendChild(document.createTextNode(trailing));
+    }
+    lastIndex = start + rawToken.length;
+  }
+  if (lastIndex < text.length) {
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+  return fragment;
+}
+
+function enhanceBubbleLinks(rootEl) {
+  if (!rootEl) return;
+  const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let current;
+  while ((current = walker.nextNode())) {
+    if (!current.nodeValue?.trim()) continue;
+    const parent = current.parentElement;
+    if (parent?.closest("a, code, pre, button")) continue;
+    if (!/(https?:\/\/|file:\/\/\/|[A-Za-z]:\\)/.test(current.nodeValue)) continue;
+    nodes.push(current);
+  }
+  nodes.forEach((node) => {
+    node.replaceWith(createLinkifiedFragment(node.nodeValue));
+  });
+}
+
+function closeChatFileViewer() {
+  if (!chatFileViewerEl) return;
+  chatFileViewerEl.hidden = true;
+  if (chatFileViewerPathEl) chatFileViewerPathEl.textContent = "-";
+  if (chatFileViewerMetaEl) chatFileViewerMetaEl.textContent = "";
+  if (chatFileViewerContentEl) chatFileViewerContentEl.textContent = "";
+  if (chatFileViewerOpenEl) {
+    chatFileViewerOpenEl.href = "#";
+    chatFileViewerOpenEl.hidden = true;
+  }
+}
+
+async function openChatFileViewer(rawPath) {
+  const filePath = normalizeLinkedFilePath(rawPath);
+  if (!filePath) {
+    showToast("❌ ファイルパスを解釈できません", "error");
+    return;
+  }
+  if (chatFileViewerEl) chatFileViewerEl.hidden = false;
+  if (chatFileViewerPathEl) chatFileViewerPathEl.textContent = filePath;
+  if (chatFileViewerMetaEl) chatFileViewerMetaEl.textContent = "読み込み中…";
+  if (chatFileViewerContentEl) chatFileViewerContentEl.textContent = "";
+  if (chatFileViewerOpenEl) {
+    chatFileViewerOpenEl.hidden = false;
+    chatFileViewerOpenEl.href = `file:///${filePath.replace(/\\/g, "/")}`;
+  }
+  try {
+    const res = await fetch(`/api/files/view?path=${encodeURIComponent(filePath)}`);
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(payload?.error || `HTTP ${res.status}`);
+    }
+    if (chatFileViewerMetaEl) {
+      chatFileViewerMetaEl.textContent =
+        payload.kind === "text"
+          ? `Lines ${payload.startLine}-${payload.endLine} / ${payload.totalLines}`
+          : "binary preview is not available in-app";
+    }
+    if (chatFileViewerOpenEl && payload.downloadUrl) {
+      chatFileViewerOpenEl.href = payload.downloadUrl;
+    }
+    if (chatFileViewerContentEl) {
+      chatFileViewerContentEl.textContent =
+        payload.kind === "text"
+          ? (payload.lines || []).map((line) => `${line.number}. ${line.text}`).join("\n")
+          : "このファイルは viewer 内では表示せず、外部で開きます。";
+    }
+    chatFileViewerEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  } catch (error) {
+    if (chatFileViewerMetaEl) chatFileViewerMetaEl.textContent = "読み込み失敗";
+    if (chatFileViewerContentEl) {
+      chatFileViewerContentEl.textContent = error instanceof Error ? error.message : String(error);
+    }
+    showToast(`❌ file viewer: ${error instanceof Error ? error.message : String(error)}`, "error");
+  }
+}
+
 function setAgentBubbleContent(bubbleEl, content, { streaming = false } = {}) {
   if (!bubbleEl) return;
   bubbleEl.dataset.rawContent = String(content ?? "");
@@ -1012,6 +1169,7 @@ function setAgentBubbleContent(bubbleEl, content, { streaming = false } = {}) {
     return;
   }
   bubbleEl.innerHTML = renderAgentMarkdown(content);
+  enhanceBubbleLinks(bubbleEl);
 }
 
 function scrollChatToBottom() {
@@ -1026,6 +1184,7 @@ function getStatusLabel(status) {
   switch (status) {
     case "manual_running": return "running";
     case "waiting_input": return "waiting input";
+    case "quota_wait": return "quota wait";
     case "running": return "running";
     case "error": return "error";
     case "ready":
@@ -1040,8 +1199,88 @@ function getWorkspaceById(workspaceId = state.workspaceId) {
   return state.workspaces.find((ws) => ws.id === workspaceId) ?? null;
 }
 
+function getSidebarActiveWorkspaces() {
+  return state.workspaces.filter((workspace) => workspace.isSidebarActive);
+}
+
+function getSidebarInactiveWorkspaces() {
+  return state.workspaces.filter((workspace) => !workspace.isSidebarActive);
+}
+
+function clearSidebarDragState() {
+  state.sidebarDrag = null;
+  sessionSidebarEl?.querySelectorAll(".drop-target, .dragging").forEach((el) => {
+    el.classList.remove("drop-target", "dragging");
+  });
+}
+
+function buildWorkspaceLayoutFromLists(activeIds, inactiveIds) {
+  return [
+    ...activeIds.map((id, index) => ({ id, isSidebarActive: true, sortOrder: index })),
+    ...inactiveIds.map((id, index) => ({ id, isSidebarActive: false, sortOrder: index })),
+  ];
+}
+
+function buildWorkspaceLayoutForDrop(draggedWorkspaceId, targetWorkspaceId, targetSection, position = "after") {
+  const activeIds = getSidebarActiveWorkspaces().map((workspace) => workspace.id).filter((id) => id !== draggedWorkspaceId);
+  const inactiveIds = getSidebarInactiveWorkspaces().map((workspace) => workspace.id).filter((id) => id !== draggedWorkspaceId);
+  const destinationIds = targetSection === "active" ? activeIds : inactiveIds;
+  const fallbackIndex = destinationIds.length;
+  const targetIndex = targetWorkspaceId
+    ? destinationIds.indexOf(targetWorkspaceId)
+    : -1;
+  const insertIndex =
+    targetIndex < 0
+      ? fallbackIndex
+      : position === "before"
+        ? targetIndex
+        : targetIndex + 1;
+
+  destinationIds.splice(Math.max(0, insertIndex), 0, draggedWorkspaceId);
+  if (targetSection === "active" && destinationIds.length > MAX_ACTIVE_WORKSPACES) {
+    inactiveIds.unshift(...destinationIds.splice(MAX_ACTIVE_WORKSPACES));
+  }
+
+  return buildWorkspaceLayoutFromLists(activeIds, inactiveIds);
+}
+
 function hasWorkspaceSelection(workspaceId = state.workspaceId) {
   return Boolean(workspaceId && getWorkspaceById(workspaceId));
+}
+
+function isSlashCommandInput(text) {
+  const normalized = String(text ?? "").trim();
+  return normalized.startsWith("/") && !/[\r\n]/u.test(normalized);
+}
+
+function getWorkspaceContextModeValue(workspace) {
+  if (workspace?.contextInjectionEnabled === true) return "on";
+  if (workspace?.contextInjectionEnabled === false) return "off";
+  return "default";
+}
+
+function formatWorkspaceContextHint(workspace) {
+  const policy = workspace?.contextPolicy;
+  if (!policy) {
+    return "";
+  }
+  const effectiveLabel = policy.effective ? "ON" : "OFF";
+  return `現在の有効状態: ${effectiveLabel} (${policy.reason})`;
+}
+
+function formatUserInputMetadata(metadata) {
+  const chips = [];
+  const normalized = metadata && typeof metadata === "object" ? metadata : null;
+  if (!normalized) return chips;
+  if (normalized.inputMode === "slash_command") {
+    chips.push("/ passthrough");
+  }
+  if (normalized.context?.used) {
+    const count = Number(normalized.context.messageCount || 0);
+    const chars = Number(normalized.context.totalChars || 0);
+    chips.push(count > 0 ? `context ${count}件 / ${chars} chars` : "context attached");
+  }
+  return chips;
 }
 
 function updateChatComposerState() {
@@ -1055,7 +1294,7 @@ function updateChatComposerState() {
   if (chatInputEl) {
     chatInputEl.disabled = !hasWorkspace;
     chatInputEl.placeholder = hasWorkspace
-      ? "メッセージを入力… bare prompt は親agentへ、agentName? prompt で対象agentへ送信"
+      ? "メッセージを入力… bare prompt は親agentへ、agentName? prompt で対象agentへ、/command は raw passthrough"
       : "ワークスペースがありません。左の「＋ workspace 作成」から始めてください";
   }
 }
@@ -1166,7 +1405,7 @@ function renderChatRouteHint() {
   const parentAgent = getWorkspaceParentAgentName(state.workspaceId);
   applyAgentThemeToElement(chatRouteHintEl, parentAgent ?? state.selectedAgent);
   chatRouteHintEl.innerHTML = parentAgent
-    ? `bare prompt は <code>${escHtml(parentAgent)}</code> へ、<code>agentName? prompt</code> で子 agent へ送信`
+    ? `bare prompt は <code>${escHtml(parentAgent)}</code> へ、<code>agentName? prompt</code> で子 agent へ送信、<code>/command</code> は raw passthrough`
     : `workspace を選択すると main chat を開始できます`;
 }
 
@@ -1255,6 +1494,10 @@ function connectSSE() {
     "run.done",
     "run.error",
     "status.change",
+    "observer.notice",
+    "approval.requested",
+    "approval.expired",
+    "approval.resolved",
     "workspace.switched",
   ].forEach((type) => es.addEventListener(type, handleEvent));
 
@@ -1290,6 +1533,7 @@ function handleCanonicalEvent(event) {
           role: "user",
           agentName,
           content: event.content ?? "",
+          metadata: event.metadata ?? null,
           time: ts(),
           runId: event.runId,
         };
@@ -1304,7 +1548,7 @@ function handleCanonicalEvent(event) {
 
     case "message.done":
       clearMessageCatchup(workspaceId, agentName);
-      finalizeDelta(agentName, event.content, workspaceId);
+      finalizeDelta(agentName, event.content, workspaceId, { runId: event.runId ?? null });
       if (relevantToTerminal) {
         registerTerminalMarker("model-done", summarizeTerminalResponse(agentName, event.content) || event.content);
         terminal.remoteTurnPromptSummary = "";
@@ -1322,10 +1566,19 @@ function handleCanonicalEvent(event) {
     case "run.done":
       clearMessageCatchup(workspaceId, agentName);
       removeTyping(agentName, workspaceId);
-      finalizeDelta(agentName, undefined, workspaceId);
-      appendRunDone(agentName, event.usage, workspaceId);
-      updateAgentStatus(agentName, "idle");
-      void refreshMessageHistory(workspaceId);
+      finalizeDelta(agentName, event.text, workspaceId, { runId: event.runId ?? null });
+      appendRunDone(agentName, workspaceId);
+      updateAgentStatus(
+        agentName,
+        event.finalStatus === "waiting_input" || event.finalStatus === "quota_wait"
+          ? event.finalStatus
+          : event.finalStatus === "timeout"
+            ? "running"
+            : "idle",
+      );
+      if (!event.text) {
+        void refreshMessageHistory(workspaceId);
+      }
       break;
 
     case "run.error":
@@ -1354,9 +1607,58 @@ function handleCanonicalEvent(event) {
           activate: false,
         });
       }
+      if (relevantToTerminal && event.status === "quota_wait" && terminal.runtimeState !== "quota_wait") {
+        registerTerminalMarker("notice", `${agentName} quota wait`, {
+          activate: false,
+        });
+      }
       updateAgentStatus(agentName, event.status);
       if (event.status === "running") {
         showTyping(agentName, workspaceId);
+      }
+      break;
+
+    case "observer.notice":
+      if (relevantToTerminal) {
+        registerTerminalMarker("notice", event.message || `${agentName} notice`, {
+          activate: false,
+        });
+        if (event.kind === "quota_wait") {
+          terminal.warningMessage = event.message || "";
+        }
+      }
+      if (workspaceId === state.workspaceId && event.message) {
+        showToast(`ℹ️ ${event.message}`, "warning", 4500);
+      }
+      break;
+
+    case "approval.requested":
+      if (relevantToTerminal) {
+        terminal.approvalRequest = event.approval || null;
+        registerTerminalMarker("waiting-input", event.approval?.summary || "approval required", {
+          activate: false,
+        });
+        renderTerminalHeader();
+      }
+      if (workspaceId === state.workspaceId && event.approval?.summary) {
+        showToast(`🛂 ${event.approval.summary}`, "warning", 5000);
+      }
+      break;
+
+    case "approval.expired":
+      if (relevantToTerminal) {
+        terminal.approvalRequest = event.approval || null;
+        renderTerminalHeader();
+      }
+      if (workspaceId === state.workspaceId) {
+        showToast("⌛ 承認待ちが期限切れになりました", "warning", 5000);
+      }
+      break;
+
+    case "approval.resolved":
+      if (relevantToTerminal) {
+        terminal.approvalRequest = event.approval || null;
+        renderTerminalHeader();
       }
       break;
 
@@ -1423,14 +1725,12 @@ function renderAgentList() {
     const el = document.createElement("div");
     el.className = `agent-item ${agent.name === state.selectedAgent ? "active" : ""}`;
     el.dataset.agent = agent.name;
-    const costHint = agent._costJpy ? `¥${agent._costJpy}` : "";
     el.innerHTML = `
       <div class="status-dot ${agent.status ?? "idle"}" id="dot-${agent.name}"></div>
       <div class="agent-info">
         <div class="agent-name">${escHtml(agent.name)}</div>
         <div class="agent-type">${escHtml(agent.type)} ${agent.model ? `· ${agent.model.split("-").slice(-1)[0]}` : ""}</div>
       </div>
-      <span class="cost-badge" id="cost-${agent.name}" ${costHint ? "" : 'style="display:none"'}>${escHtml(costHint)}</span>
     `;
     el.addEventListener("click", () => selectAgent(agent.name));
     agentListEl.appendChild(el);
@@ -1439,6 +1739,7 @@ function renderAgentList() {
 
 function renderSessionSidebar() {
   if (!sessionSidebarEl) return;
+  state.sidebarDrag = null;
   sessionSidebarEl.innerHTML = "";
 
   const createCard = document.createElement("div");
@@ -1463,95 +1764,221 @@ function renderSessionSidebar() {
     return;
   }
 
-  for (const workspace of state.workspaces) {
-    const parentAgent = getWorkspaceParentAgentName(workspace.id);
-    const members = getWorkspaceAgents(workspace.id);
-    const children = members.filter((entry) => !entry.isParent);
-    const isExpanded = state.expandedSessions.has(workspace.id);
-    const parentTheme = getAgentTheme(parentAgent);
-    const card = document.createElement("div");
-    card.className = `session-card ${workspace.id === state.workspaceId ? "active" : ""}`;
-    card.dataset.agentTheme = parentTheme.key;
-    card.setAttribute("style", buildAgentThemeStyle(parentAgent));
-    card.innerHTML = `
-      <div class="session-card-header">
-        <button type="button" class="session-card-main" data-session-open="${workspace.id}">
-          <div class="session-card-title">${escHtml(workspace.name)}</div>
-          <div class="session-card-meta">
-            <span class="session-parent-chip">${escHtml(parentAgent ?? "親agent未設定")}</span>
-            <span>${members.length} agents</span>
-          </div>
-        </button>
-        <div class="session-card-actions">
-          <button type="button" class="session-action-btn" data-session-toggle="${workspace.id}" title="agent 一覧">${isExpanded ? "▼" : "▶"}</button>
-          <button type="button" class="session-action-btn" data-session-settings="${workspace.id}" title="workspace 設定">⚙</button>
-        </div>
+  const sections = [
+    {
+      key: "active",
+      label: `active workspaces (${getSidebarActiveWorkspaces().length}/${MAX_ACTIVE_WORKSPACES})`,
+      hint: "起動後に上から順次 CLI を自動起動",
+      workspaces: getSidebarActiveWorkspaces(),
+    },
+    {
+      key: "inactive",
+      label: `inactive workspaces (${getSidebarInactiveWorkspaces().length})`,
+      hint: "Chat 送信時 / Terminal 表示時に lazy 起動",
+      workspaces: getSidebarInactiveWorkspaces(),
+    },
+  ];
+
+  for (const section of sections) {
+    const sectionEl = document.createElement("section");
+    sectionEl.className = "session-sidebar-section";
+    sectionEl.dataset.sidebarSection = section.key;
+    sectionEl.innerHTML = `
+      <div class="session-sidebar-section-head">
+        <div class="session-sidebar-section-title">${escHtml(section.label)}</div>
+        <div class="session-sidebar-section-hint">${escHtml(section.hint)}</div>
       </div>
-      <div class="session-card-accordion" ${isExpanded ? "" : "hidden"}></div>
+      <div class="session-sidebar-section-body"></div>
     `;
-    const accordion = card.querySelector(".session-card-accordion");
-    for (const member of members) {
-      const agent = getSelectedAgentInfo(member.agentName);
-      const row = document.createElement("div");
-      const rowTheme = getAgentTheme(member.agentName);
-      row.className = `session-agent-row ${workspace.id === state.workspaceId && state.selectedAgent === member.agentName && state.activeTab === "terminal" ? "active" : ""}`;
-      row.dataset.agentTheme = rowTheme.key;
-      row.setAttribute("style", buildAgentThemeStyle(member.agentName));
-      row.innerHTML = `
-        <div class="status-dot ${agent?.status ?? "idle"}"></div>
-        <button type="button" class="session-agent-main" data-session-terminal="${workspace.id}" data-agent-name="${member.agentName}">
-          <div class="session-agent-head">
-            <div class="session-agent-name">${escHtml(member.agentName)}</div>
-            <span class="session-agent-chip">${member.isParent ? "parent" : escHtml(agent?.type ?? "agent")}</span>
-          </div>
-          <div class="session-agent-meta">${member.isParent ? "parent agent" : `${agent?.type ?? "agent"} · ${agent?.model || "model 未設定"}`}</div>
-        </button>
-        <div class="session-agent-actions">
-          <button type="button" class="session-action-btn" data-agent-settings="${member.agentName}" data-settings-workspace="${workspace.id}" title="agent 設定">⚙</button>
-          ${member.isParent ? "" : `<button type="button" class="session-action-btn" data-agent-remove="${member.agentName}" data-remove-workspace="${workspace.id}" title="child agent を外す">－</button>`}
-        </div>
-      `;
-      accordion?.appendChild(row);
+    const bodyEl = sectionEl.querySelector(".session-sidebar-section-body");
+    sectionEl.addEventListener("dragover", (event) => {
+      if (!state.sidebarDrag) return;
+      event.preventDefault();
+      sectionEl.classList.add("drop-target");
+    });
+    sectionEl.addEventListener("dragleave", (event) => {
+      if (!sectionEl.contains(event.relatedTarget)) {
+        sectionEl.classList.remove("drop-target");
+      }
+    });
+    sectionEl.addEventListener("drop", (event) => {
+      if (!state.sidebarDrag) return;
+      event.preventDefault();
+      sectionEl.classList.remove("drop-target");
+      const lastWorkspaceId = section.workspaces.at(-1)?.id ?? null;
+      const layout = buildWorkspaceLayoutForDrop(
+        state.sidebarDrag.workspaceId,
+        lastWorkspaceId,
+        section.key,
+        "after",
+      );
+      clearSidebarDragState();
+      void saveWorkspaceLayout(layout);
+    });
+
+    if (section.workspaces.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-sidebar-section-empty";
+      empty.textContent = section.key === "active"
+        ? "active workspace はまだありません"
+        : "inactive workspace はまだありません";
+      bodyEl?.appendChild(empty);
     }
-    const availableChildAgents = state.agents.filter((agent) => !members.some((entry) => entry.agentName === agent.name));
-    for (let index = children.length; index < 3; index += 1) {
-      const emptySlot = document.createElement("div");
-      const isMenuOpen = state.childAgentMenu?.workspaceId === workspace.id && state.childAgentMenu?.slotIndex === index;
-      emptySlot.className = "session-empty-agent-slot";
-      emptySlot.innerHTML = `
-        <div class="session-empty-agent-slot-header">
-          <span>child agent slot</span>
+
+    for (const workspace of section.workspaces) {
+      const parentAgent = getWorkspaceParentAgentName(workspace.id);
+      const members = getWorkspaceAgents(workspace.id);
+      const children = members.filter((entry) => !entry.isParent);
+      const isExpanded = state.expandedSessions.has(workspace.id);
+      const parentTheme = getAgentTheme(parentAgent);
+      const card = document.createElement("div");
+      card.className = `session-card ${workspace.id === state.workspaceId ? "active" : ""}`;
+      card.dataset.agentTheme = parentTheme.key;
+      card.dataset.workspaceId = workspace.id;
+      card.dataset.sidebarSection = section.key;
+      card.draggable = true;
+      card.setAttribute("style", buildAgentThemeStyle(parentAgent));
+      card.innerHTML = `
+        <div class="session-card-header">
           <button
             type="button"
-            class="session-empty-agent-slot-add"
-            data-add-child="${workspace.id}"
-            data-child-slot="${index}"
-            title="child agent を追加"
-            aria-expanded="${isMenuOpen ? "true" : "false"}"
-            ${availableChildAgents.length === 0 ? "disabled" : ""}
-          >＋</button>
-        </div>
-        ${isMenuOpen ? `
-          <div class="session-add-child-menu" role="menu" aria-label="child agent 選択">
-            ${availableChildAgents.map((agent) => `
-              <button
-                type="button"
-                class="session-add-child-option"
-                role="menuitem"
-                data-add-child-option="${workspace.id}"
-                data-add-agent-name="${escHtml(agent.name)}"
-              >
-                <span class="session-add-child-option-name">${escHtml(agent.name)}</span>
-                <span class="session-add-child-option-meta">${escHtml(agent.type ?? "agent")} · ${escHtml(agent.model || "model 未設定")}</span>
-              </button>
-            `).join("")}
+            class="session-drag-handle"
+            data-session-drag="${workspace.id}"
+            title="並び替え"
+            aria-label="${escHtml(workspace.name)} をドラッグして並び替え"
+          >⋮⋮</button>
+          <button type="button" class="session-card-main" data-session-open="${workspace.id}">
+            <div class="session-card-title">${escHtml(workspace.name)}</div>
+            <div class="session-card-meta">
+              <span class="session-parent-chip">${escHtml(parentAgent ?? "親agent未設定")}</span>
+              <span>${members.length} agents</span>
+            </div>
+          </button>
+          <div class="session-card-actions">
+            <button type="button" class="session-action-btn" data-session-toggle="${workspace.id}" title="agent 一覧">${isExpanded ? "▼" : "▶"}</button>
+            <button type="button" class="session-action-btn" data-session-settings="${workspace.id}" title="workspace 設定">⚙</button>
           </div>
-        ` : ""}
+        </div>
+        <div class="session-card-accordion" ${isExpanded ? "" : "hidden"}></div>
       `;
-      accordion?.appendChild(emptySlot);
+      card.addEventListener("dragstart", (event) => {
+        state.sidebarDrag = { workspaceId: workspace.id, sourceSection: section.key };
+        card.classList.add("dragging");
+        event.dataTransfer?.setData("text/plain", workspace.id);
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = "move";
+        }
+      });
+      card.addEventListener("dragend", () => {
+        clearSidebarDragState();
+      });
+      card.addEventListener("dragover", (event) => {
+        if (!state.sidebarDrag || state.sidebarDrag.workspaceId === workspace.id) return;
+        event.preventDefault();
+        card.classList.add("drop-target");
+      });
+      card.addEventListener("dragleave", (event) => {
+        if (!card.contains(event.relatedTarget)) {
+          card.classList.remove("drop-target");
+        }
+      });
+      card.addEventListener("drop", (event) => {
+        if (!state.sidebarDrag || state.sidebarDrag.workspaceId === workspace.id) return;
+        event.preventDefault();
+        const rect = card.getBoundingClientRect();
+        const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+        const layout = buildWorkspaceLayoutForDrop(
+          state.sidebarDrag.workspaceId,
+          workspace.id,
+          section.key,
+          position,
+        );
+        clearSidebarDragState();
+        void saveWorkspaceLayout(layout);
+      });
+      const accordion = card.querySelector(".session-card-accordion");
+      for (const member of members) {
+        const agent = getSelectedAgentInfo(member.agentName);
+        const row = document.createElement("div");
+        const rowTheme = getAgentTheme(member.agentName);
+        row.className = `session-agent-row ${workspace.id === state.workspaceId && state.selectedAgent === member.agentName && state.activeTab === "terminal" ? "active" : ""}`;
+        row.dataset.agentTheme = rowTheme.key;
+        row.setAttribute("style", buildAgentThemeStyle(member.agentName));
+        row.innerHTML = `
+          <div class="status-dot ${agent?.status ?? "idle"}"></div>
+          <button type="button" class="session-agent-main" data-session-terminal="${workspace.id}" data-agent-name="${member.agentName}">
+            <div class="session-agent-head">
+              <div class="session-agent-name">${escHtml(member.agentName)}</div>
+              <span class="session-agent-chip">${member.isParent ? "parent" : escHtml(agent?.type ?? "agent")}</span>
+            </div>
+            <div class="session-agent-meta">${member.isParent ? "parent agent" : `${agent?.type ?? "agent"} · ${agent?.model || "model 未設定"}`}</div>
+          </button>
+          <div class="session-agent-actions">
+            <button type="button" class="session-action-btn" data-agent-settings="${member.agentName}" data-settings-workspace="${workspace.id}" title="agent 設定">⚙</button>
+            ${member.isParent ? "" : `<button type="button" class="session-action-btn" data-agent-remove="${member.agentName}" data-remove-workspace="${workspace.id}" title="child agent を外す">－</button>`}
+          </div>
+        `;
+        accordion?.appendChild(row);
+      }
+      const availableChildAgents = state.agents.filter((agent) => !members.some((entry) => entry.agentName === agent.name));
+      for (let index = children.length; index < 3; index += 1) {
+        const emptySlot = document.createElement("div");
+        const isMenuOpen = state.childAgentMenu?.workspaceId === workspace.id && state.childAgentMenu?.slotIndex === index;
+        emptySlot.className = "session-empty-agent-slot";
+        emptySlot.innerHTML = `
+          <div class="session-empty-agent-slot-header">
+            <span>child agent slot</span>
+            <button
+              type="button"
+              class="session-empty-agent-slot-add"
+              data-add-child="${workspace.id}"
+              data-child-slot="${index}"
+              title="child agent を追加"
+              aria-expanded="${isMenuOpen ? "true" : "false"}"
+              ${availableChildAgents.length === 0 ? "disabled" : ""}
+            >＋</button>
+          </div>
+          ${isMenuOpen ? `
+            <div class="session-add-child-menu" role="menu" aria-label="child agent 選択">
+              ${availableChildAgents.map((agent) => `
+                <button
+                  type="button"
+                  class="session-add-child-option"
+                  role="menuitem"
+                  data-add-child-option="${workspace.id}"
+                  data-add-agent-name="${escHtml(agent.name)}"
+                >
+                  <span class="session-add-child-option-name">${escHtml(agent.name)}</span>
+                  <span class="session-add-child-option-meta">${escHtml(agent.type ?? "agent")} · ${escHtml(agent.model || "model 未設定")}</span>
+                </button>
+              `).join("")}
+            </div>
+          ` : ""}
+        `;
+        accordion?.appendChild(emptySlot);
+      }
+      bodyEl?.appendChild(card);
     }
-    sessionSidebarEl.appendChild(card);
+
+    sessionSidebarEl.appendChild(sectionEl);
   }
+}
+
+async function saveWorkspaceLayout(items) {
+  const res = await fetch("/api/workspaces/layout", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(`❌ workspace 並び替えに失敗: ${err.error ?? res.status}`, "error");
+    renderSessionSidebar();
+    return;
+  }
+  await res.json().catch(() => null);
+  await loadWorkspaces();
+  void triggerActiveWorkspaceBootstrap({ force: true });
 }
 
 async function openWorkspaceChat(workspaceId) {
@@ -1863,13 +2290,18 @@ function appendMsgEl(msg, scroll = true) {
   const displayContent = getDisplayMessageContent(msg);
 
   if (msg.role === "user") {
+    const metadataChips = formatUserInputMetadata(msg.metadata);
     const targetLabel = msg.agentName
       ? `<span class="msg-target-chip" style="${buildAgentThemeStyle(msg.agentName)}" data-agent-theme="${getAgentTheme(msg.agentName).key}">${escHtml(msg.agentName)}</span>`
       : "";
+    const metadataLabel = metadataChips.length > 0
+      ? `<span class="msg-input-meta">${metadataChips.map((chip) => `<span class="msg-input-meta-chip">${escHtml(chip)}</span>`).join("")}</span>`
+      : "";
     el.innerHTML = `
-      <div class="msg-meta"><span class="msg-meta-main"><span class="msg-author-chip user">You</span>${targetLabel}</span><span>${msg.time}</span></div>
+      <div class="msg-meta"><span class="msg-meta-main"><span class="msg-author-chip user">You</span>${targetLabel}${metadataLabel}</span><span>${msg.time}</span></div>
       <div class="msg-bubble">${escHtml(displayContent)}</div>
     `;
+    enhanceBubbleLinks(el.querySelector(".msg-bubble"));
   } else if (msg.role === "agent") {
     const theme = getAgentTheme(msg.agentName);
     el.dataset.agentTheme = theme.key;
@@ -1881,6 +2313,7 @@ function appendMsgEl(msg, scroll = true) {
     setAgentBubbleContent(el.querySelector(".msg-bubble"), displayContent);
   } else if (msg.role === "system") {
     el.innerHTML = `<div class="msg-bubble">${escHtml(displayContent)}</div>`;
+    enhanceBubbleLinks(el.querySelector(".msg-bubble"));
   }
 
   chatLogEl.appendChild(el);
@@ -1973,20 +2406,31 @@ function appendDelta(agentName, content, workspaceId) {
   scrollChatToBottom();
 }
 
-function finalizeDelta(agentName, fullContent, workspaceId) {
+function finalizeDelta(agentName, fullContent, workspaceId, { runId = null } = {}) {
   const streamKey = getWorkspaceStreamKey(workspaceId, agentName);
   const buffered = state.deltaBuffers.get(streamKey) ?? "";
   const bubble = state.deltaBubbles.get(streamKey);
   const content = fullContent ?? (bubble ? bubble.dataset.rawContent : buffered);
+  const hasExistingMessage = runId
+    ? hasWorkspaceMessage(workspaceId, (entry) =>
+      entry.role === "agent" &&
+      entry.runId === runId &&
+      entry.agentName === agentName
+    )
+    : false;
 
   // If we have a bubble, it's already rendered
-  if (!bubble && content && isChatVisibleForWorkspace(workspaceId)) {
-    const msg = { role: "agent", agentName, content, time: ts() };
+  if (!bubble && content && !hasExistingMessage && isChatVisibleForWorkspace(workspaceId)) {
+    const msg = { role: "agent", agentName, content, time: ts(), runId };
     pushMsg(workspaceId, msg);
     appendMsgEl(msg);
-  } else if (content) {
+  } else if (content && !hasExistingMessage) {
+    if (bubble) {
+      setAgentBubbleContent(bubble, content);
+    }
+    pushMsg(workspaceId, { role: "agent", agentName, content, time: ts(), runId });
+  } else if (content && bubble) {
     setAgentBubbleContent(bubble, content);
-    pushMsg(workspaceId, { role: "agent", agentName, content, time: ts() });
   }
 
   state.deltaBubbles.delete(streamKey);
@@ -2001,22 +2445,12 @@ function appendSystemMsg(text) {
   scrollChatToBottom();
 }
 
-function appendRunDone(agentName, usage, workspaceId) {
+function appendRunDone(agentName, workspaceId) {
   if (!isChatVisibleForWorkspace(workspaceId)) return;
-
-  const parts = [];
-  if (usage?.inputTokens) parts.push(`in: ${usage.inputTokens.toLocaleString()}`);
-  if (usage?.outputTokens) parts.push(`out: ${usage.outputTokens.toLocaleString()}`);
-  if (usage?.costUsd) {
-    const jpy = (usage.costUsd * 150).toFixed(1);
-    parts.push(`¥${jpy}`);
-  }
-
-  if (parts.length === 0) return;
 
   const badge = document.createElement("div");
   badge.className = "run-done-badge";
-  badge.textContent = `✅ 完了 📊 ${parts.join(" / ")}`;
+  badge.textContent = `✅ ${agentName} 完了`;
   chatLogEl.appendChild(badge);
   scrollChatToBottom();
 }
@@ -2136,6 +2570,7 @@ function resolveChatTarget(rawPrompt) {
       agentName: targetAgent,
       prompt: prefixedMatch[2].trim(),
       displayPrompt: prefixedMatch[2].trim(),
+      inputMode: isSlashCommandInput(prefixedMatch[2]) ? "slash_command" : "prompt",
     };
   }
   const parentAgent = getWorkspaceParentAgentName(state.workspaceId);
@@ -2146,6 +2581,7 @@ function resolveChatTarget(rawPrompt) {
     agentName: parentAgent,
     prompt,
     displayPrompt: prompt,
+    inputMode: isSlashCommandInput(prompt) ? "slash_command" : "prompt",
   };
 }
 
@@ -2171,7 +2607,11 @@ async function sendMessage() {
     const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: route.prompt, workspaceId }),
+      body: JSON.stringify({
+        prompt: route.prompt,
+        workspaceId,
+        inputMode: route.inputMode || "prompt",
+      }),
     });
 
     if (!res.ok) {
@@ -2262,6 +2702,9 @@ async function loadWorkspaces() {
   } else if (!nextWorkspaceId) {
     renderChatLog(null);
   }
+  if (state.bootReady) {
+    void triggerActiveWorkspaceBootstrap();
+  }
 }
 
 async function loadWorkspaceAgents(workspaceId) {
@@ -2275,6 +2718,52 @@ async function loadWorkspaceAgents(workspaceId) {
 
 async function loadAllWorkspaceAgents() {
   await Promise.all(state.workspaces.map((workspace) => loadWorkspaceAgents(workspace.id)));
+}
+
+async function prewarmWorkspaceAgent(workspaceId, agentName) {
+  try {
+    await fetch(`/api/agents/${encodeURIComponent(agentName)}/prewarm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId, waitForReadyMs: 4000 }),
+    });
+  } catch {}
+}
+
+async function triggerActiveWorkspaceBootstrap({ force = false } = {}) {
+  if (!state.bootReady) return;
+  const signature = getSidebarActiveWorkspaces()
+    .map((workspace) => `${workspace.id}:${getWorkspaceAgents(workspace.id).map((entry) => entry.agentName).join(",")}`)
+    .join("|");
+  if (!signature) {
+    state.activeBootstrapSignature = "";
+    return;
+  }
+  if (!force && signature === state.activeBootstrapSignature) {
+    return;
+  }
+  if (state.activeBootstrapPromise) {
+    state.pendingActiveBootstrapSignature = signature;
+    return;
+  }
+  state.activeBootstrapSignature = signature;
+  state.activeBootstrapPromise = (async () => {
+    for (const workspace of getSidebarActiveWorkspaces()) {
+      const members = getWorkspaceAgents(workspace.id);
+      for (const member of members) {
+        await prewarmWorkspaceAgent(workspace.id, member.agentName);
+      }
+    }
+  })().finally(() => {
+    state.activeBootstrapPromise = null;
+    if (
+      state.pendingActiveBootstrapSignature &&
+      state.pendingActiveBootstrapSignature !== state.activeBootstrapSignature
+    ) {
+      state.pendingActiveBootstrapSignature = "";
+      void triggerActiveWorkspaceBootstrap({ force: true });
+    }
+  });
 }
 
 async function activateWorkspace(wsId, { preferredAgentName = state.selectedAgent } = {}) {
@@ -2453,11 +2942,21 @@ chatInputEl.addEventListener("input", () => {
 });
 
 chatLogEl?.addEventListener("click", (event) => {
+  const fileLink = event.target.closest(".msg-file-link");
+  if (fileLink) {
+    event.preventDefault();
+    void openChatFileViewer(fileLink.dataset.filePath || "");
+    return;
+  }
   const action = event.target.closest("[data-empty-chat-action]");
   if (!action) return;
   if (action.getAttribute("data-empty-chat-action") === "create-workspace") {
     openSessionCreate();
   }
+});
+
+btnChatFileViewerCloseEl?.addEventListener("click", () => {
+  closeChatFileViewer();
 });
 
 // Tab switching
@@ -2517,6 +3016,7 @@ async function loadMessageHistory(workspaceId) {
       role: m.role === "user" ? "user" : "agent",
       agentName: m.agentName,
       content: m.content ?? "",
+      metadata: m.metadata ?? null,
       time: formatMessageTime(m.createdAt),
     })));
   } catch {
@@ -2559,6 +3059,7 @@ const TERMINAL_STATUS_TEXT = {
   ready: "ready",
   running: "running",
   waiting_input: "waiting input",
+  quota_wait: "quota wait",
   error: "error",
 };
 const TERMINAL_MARKER_LIMIT = 120;
@@ -2573,8 +3074,9 @@ const TERMINAL_MARKER_META = {
 const TERMINAL_HEURISTICS = {
   gemini: {
     readyRe: /Type your message or @path/,
-    waitingInputRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no|login:|auth:|password:|credentials|how would you like to authenticate|enter the authorization code|use enter to select|please visit the following url/i,
+    waitingInputRe: /approve|allow|confirm\?|continue\?|y\/n|yes\/no|login:|auth:|password:|credentials|how would you like to authenticate|enter the authorization code|use enter to select|please visit the following url|select model|press esc to close/i,
     authRequiredRe: /Waiting for authentication|Sign in with Google|Use Gemini API key|Continue in your browser|Open this URL|How would you like to authenticate|Please visit the following URL to authorize the application|Enter the authorization code|Authentication consent could not be obtained|Failed to authenticate with authorization code|Failed to authenticate with user code/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|retry after|available again|try again later/i,
     stillRunningRe: /thinking|running|processing|elapsed|\d{1,3}:\d{2}/i,
     readyReturnRe: /Type your message or @path/,
   },
@@ -2582,6 +3084,7 @@ const TERMINAL_HEURISTICS = {
     readyRe: /(?:^|\n)\s*(?:❯|>)\s*$/m,
     waitingInputRe: /Allow external CLAUDE\.md file imports\?|Do you trust the contents of this directory\?|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Allow external CLAUDE\.md file imports\?|Do you trust the contents of this directory\?/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /thinking|running|processing|shimmying|gusting|\d{1,3}:\d{2}/i,
     readyReturnRe: /(?:^|\n)\s*(?:❯|>)\s*$/m,
   },
@@ -2589,12 +3092,14 @@ const TERMINAL_HEURISTICS = {
     readyRe: /Type @ to mention files, # for issues\/PRs, \/ for commands, or \? for shortcuts/i,
     waitingInputRe: /Do you trust the files in this folder\?|↑↓ to navigate|Enter to select|Esc to cancel|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Confirm folder trust|Do you trust the files in this folder\?|Sign in to GitHub|Log in to GitHub|Open this URL|Enter verification code/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /thinking|running|processing|remaining reqs/i,
     readyReturnRe: /Type @ to mention files, # for issues\/PRs, \/ for commands, or \? for shortcuts/i,
   },
   codex: {
     waitingInputRe: /Do you trust the contents of this directory\?|approve|allow|confirm\?|continue\?|y\/n|yes\/no/i,
     authRequiredRe: /Do you trust the contents of this directory\?/i,
+    quotaRe: /usage limit|rate limit|quota|too many requests|try again later|available again/i,
     stillRunningRe: /working|thinking|running|processing|booting mcp server|esc to interrupt/i,
   },
 };
@@ -2722,6 +3227,9 @@ const terminal = {
   remoteTurnPromptSummary: "",
   seenReadyPrompt: false,
   configWarning: "",
+  warningMessage: "",
+  approvalRequest: null,
+  quotaNotice: null,
   markerLayout: initialTerminalLayoutPrefs.markerLayout,
   recentSessions: initialTerminalLayoutPrefs.recentSessions,
   activeSessionId: initialTerminalLayoutPrefs.activeSessionId,
@@ -3466,7 +3974,7 @@ function getTerminalBadgeState() {
   const heuristics = getTerminalHeuristics();
   if (
     terminal.plainBuffer &&
-    !["running", "waiting_input", "error"].includes(terminal.runtimeState) &&
+    !["running", "waiting_input", "quota_wait", "error"].includes(terminal.runtimeState) &&
     (
       matchesTerminalHeuristic(heuristics, "readyRe", terminal.plainBuffer, terminal.draftInputBuffer) ||
       matchesTerminalHeuristic(heuristics, "readyReturnRe", terminal.plainBuffer, terminal.draftInputBuffer)
@@ -3533,8 +4041,21 @@ function renderTerminalHeader() {
         : "workspace がないため terminal は未接続です";
   }
   if (terminalConfigWarningEl) {
-    terminalConfigWarningEl.textContent = terminal.configWarning || "";
-    terminalConfigWarningEl.hidden = !terminal.configWarning;
+    const warningText = terminal.warningMessage || terminal.configWarning || "";
+    terminalConfigWarningEl.textContent = warningText;
+    terminalConfigWarningEl.hidden = !warningText;
+  }
+  if (terminalApprovalBannerEl) {
+    const approval = terminal.approvalRequest;
+    const approvalText = approval?.summary && ["pending", "expired"].includes(approval.status)
+      ? (approval.status === "expired" ? `期限切れ: ${approval.summary}` : approval.summary)
+      : "";
+    terminalApprovalBannerEl.hidden = !approvalText;
+    if (terminalApprovalTextEl) {
+      terminalApprovalTextEl.textContent = approvalText;
+    }
+    btnTerminalApproveEl.disabled = !terminal.agentName || approval?.status !== "pending";
+    btnTerminalDenyEl.disabled = !terminal.agentName || approval?.status !== "pending";
   }
   if (terminalStatusBadgeEl) {
     terminalStatusBadgeEl.className = `terminal-status-badge ${badgeState}`;
@@ -3578,6 +4099,9 @@ function syncTerminalStatusFromAgent(agentName, status) {
     return;
   }
   if (status === "running" || status === "waiting_input" || status === "error") {
+    setTerminalRuntimeState(status);
+  }
+  if (status === "quota_wait") {
     setTerminalRuntimeState(status);
   }
 }
@@ -3646,6 +4170,9 @@ function resetTerminalView() {
   terminal.remoteTurnPromptSummary = "";
   terminal.seenReadyPrompt = false;
   terminal.configWarning = "";
+  terminal.warningMessage = "";
+  terminal.approvalRequest = null;
+  terminal.quotaNotice = null;
   terminalShellEl?.classList.remove("fallback-active");
   if (terminalFallbackEl) {
     terminalFallbackEl.hidden = true;
@@ -3725,6 +4252,7 @@ async function sendTerminalPrompt(text) {
   }
 
   try {
+    const inputMode = isSlashCommandInput(text) ? "slash_command" : "prompt";
     const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3733,6 +4261,7 @@ async function sendTerminalPrompt(text) {
         workspaceId,
         source: "terminal",
         includeContext: false,
+        inputMode,
       }),
     });
     if (!res.ok) {
@@ -3963,6 +4492,7 @@ function updateTerminalStateFromOutput(rawText) {
   const fullPlain = terminal.plainBuffer;
   const heuristics = getTerminalHeuristics();
   updateLocalTurnFromOutput(plain, fullPlain);
+  const hasActiveLocalTurn = Boolean(terminal.localTurn);
   const readyDetected =
     matchesTerminalHeuristic(heuristics, "readyRe", plain, terminal.draftInputBuffer) ||
     matchesTerminalHeuristic(heuristics, "readyRe", fullPlain, terminal.draftInputBuffer) ||
@@ -3970,7 +4500,9 @@ function updateTerminalStateFromOutput(rawText) {
     matchesTerminalHeuristic(heuristics, "readyReturnRe", fullPlain, terminal.draftInputBuffer);
   if (readyDetected) {
     terminal.seenReadyPrompt = true;
-    setTerminalRuntimeState("ready");
+    if (!hasActiveLocalTurn) {
+      setTerminalRuntimeState("ready");
+    }
     return;
   }
   const explicitAuthStepRe = /Sign in with Google|Use Gemini API key|Continue in your browser|Open this URL/i;
@@ -3982,6 +4514,13 @@ function updateTerminalStateFromOutput(rawText) {
       registerTerminalMarker("waiting-input", "Authentication required", { activate: false });
     }
     setTerminalRuntimeState("waiting_input");
+    return;
+  }
+  if (heuristics.quotaRe?.test(plain) || heuristics.quotaRe?.test(fullPlain)) {
+    if (terminal.runtimeState !== "quota_wait") {
+      registerTerminalMarker("notice", summarizeTerminalMarkerText(plain, "quota wait"), { activate: false });
+    }
+    setTerminalRuntimeState("quota_wait");
     return;
   }
   if (heuristics.waitingInputRe?.test(plain) && !heuristics.stillRunningRe?.test(plain)) {
@@ -3999,6 +4538,9 @@ function updateTerminalStateFromOutput(rawText) {
 async function refreshTerminalState() {
   if (!terminal.agentName || !terminal.workspaceId) {
     terminal.configWarning = "";
+    terminal.warningMessage = "";
+    terminal.approvalRequest = null;
+    terminal.quotaNotice = null;
     setTerminalRuntimeState("disconnected");
     return;
   }
@@ -4008,6 +4550,9 @@ async function refreshTerminalState() {
     );
     if (!res.ok) return;
     const snapshot = await res.json();
+    terminal.approvalRequest = snapshot.approvalRequest || null;
+    terminal.quotaNotice = snapshot.quotaNotice || null;
+    terminal.warningMessage = snapshot.warningMessage || "";
     const heuristics = getTerminalHeuristics();
     const bufferedText = terminal.plainBuffer;
     const bufferLooksReady = Boolean(
@@ -4025,12 +4570,13 @@ async function refreshTerminalState() {
       setTerminalRuntimeState(snapshot.status);
       return;
     }
-    if (snapshot.status === "waiting_input" || snapshot.status === "error") {
+    if (snapshot.status === "waiting_input" || snapshot.status === "quota_wait" || snapshot.status === "error") {
       setTerminalRuntimeState(snapshot.status);
       return;
     }
     if (!snapshot.hasProcess) {
       terminal.configWarning = "";
+      terminal.approvalRequest = null;
       setTerminalRuntimeState(terminal.connectionState === "open" ? "starting" : "disconnected");
       return;
     }
@@ -4330,6 +4876,26 @@ async function reconnectTerminal() {
   connectTerminal(terminal.agentName, { force: true });
 }
 
+async function respondToTerminalApproval(decision) {
+  if (!terminal.agentName || !terminal.workspaceId) return;
+  const res = await fetch(`/api/agents/${encodeURIComponent(terminal.agentName)}/approval`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: terminal.workspaceId, decision }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok || !payload?.ok) {
+    showToast(`❌ 承認応答に失敗: ${payload?.error || payload?.reason || res.status}`, "error");
+    return;
+  }
+  terminal.approvalRequest = payload?.approval || null;
+  renderTerminalHeader();
+  showToast(
+    decision === "approve" ? "✅ approve を送信しました" : "🛑 deny を送信しました",
+    "success",
+  );
+}
+
 btnTerminalReconnectEl?.addEventListener("click", () => void reconnectTerminal());
 btnTerminalLayoutSideEl?.addEventListener("click", () => setTerminalLayoutMode("side"));
 btnTerminalLayoutBottomEl?.addEventListener("click", () => setTerminalLayoutMode("bottom"));
@@ -4342,6 +4908,8 @@ btnTerminalSearchNextEl?.addEventListener("click", () => runTerminalSearch("next
 btnTerminalSearchCloseEl?.addEventListener("click", closeTerminalSearch);
 btnTerminalMarkerPrevEl?.addEventListener("click", () => navigateTerminalMarkers(-1));
 btnTerminalMarkerNextEl?.addEventListener("click", () => navigateTerminalMarkers(1));
+btnTerminalApproveEl?.addEventListener("click", () => void respondToTerminalApproval("approve"));
+btnTerminalDenyEl?.addEventListener("click", () => void respondToTerminalApproval("deny"));
 terminalSearchInputEl?.addEventListener("input", () => {
   runTerminalSearch("next", { incremental: true });
 });
@@ -4497,6 +5065,14 @@ async function loadSettingsWorkdir() {
     const settings = await res.json();
     settingsWorkdirEl.value = settings?.defaultWorkdir ?? "";
   } catch {}
+  try {
+    const res = await fetch("/api/memory/global");
+    if (!res.ok) return;
+    const payload = await res.json();
+    if (globalMemoryInputEl) {
+      globalMemoryInputEl.value = payload?.content ?? "";
+    }
+  } catch {}
 }
 
 async function loadSessionSettings(workspaceId) {
@@ -4518,6 +5094,17 @@ async function loadSessionSettings(workspaceId) {
     }
   } catch {}
   populateDiscordChannelSelect(sessionDiscordChannelEl, selectedChannelId);
+  if (sessionContextModeEl) {
+    sessionContextModeEl.value = getWorkspaceContextModeValue(workspace);
+  }
+  setInlineHint(sessionContextHintEl, formatWorkspaceContextHint(workspace));
+  try {
+    const res = await fetch(`/api/memory/workspaces/${encodeURIComponent(workspaceId)}`);
+    if (res.ok && sessionMemoryInputEl) {
+      const payload = await res.json();
+      sessionMemoryInputEl.value = payload?.content ?? "";
+    }
+  } catch {}
 }
 
 async function loadAgentSettings(agentName) {
@@ -4537,6 +5124,13 @@ async function loadAgentSettings(agentName) {
   configureAgentSettingsControls(agent, runtimeInfo);
   agentWorkdirInputEl.value = agent.settings?.workdir ?? "";
   agentInstructionsInputEl.value = agent.settings?.instructions ?? "";
+  try {
+    const memoryRes = await fetch(`/api/memory/agents/${encodeURIComponent(agentName)}`);
+    if (memoryRes.ok && agentMemoryInputEl) {
+      const payload = await memoryRes.json();
+      agentMemoryInputEl.value = payload?.content ?? "";
+    }
+  } catch {}
 }
 
 async function renderSettingsScope() {
@@ -4667,6 +5261,19 @@ btnSaveWorkdirEl?.addEventListener("click", async () => {
   showToast("✅ default workdir を保存しました", "success");
 });
 
+btnSaveGlobalMemoryEl?.addEventListener("click", async () => {
+  const res = await fetch("/api/memory/global", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: globalMemoryInputEl?.value ?? "" }),
+  });
+  if (!res.ok) {
+    showToast("❌ global memory の保存に失敗しました", "error");
+    return;
+  }
+  showToast("✅ global memory を保存しました", "success");
+});
+
 btnSessionCreateSaveEl?.addEventListener("click", async () => {
   const name = sessionCreateNameEl.value.trim();
   const parentAgent = sessionCreateParentAgentEl.value.trim();
@@ -4704,6 +5311,7 @@ btnSessionSaveEl?.addEventListener("click", async () => {
     body: JSON.stringify({
       name: sessionNameInputEl.value.trim(),
       workdir: sessionWorkdirInputEl.value.trim() || null,
+      contextInjectionMode: sessionContextModeEl?.value || "default",
     }),
   });
   if (!res.ok) {
@@ -4726,6 +5334,21 @@ btnSessionSaveEl?.addEventListener("click", async () => {
   await loadWorkspaces();
   showToast("✅ workspace 設定を保存しました", "success");
   void renderSettingsScope();
+});
+
+btnSaveSessionMemoryEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const res = await fetch(`/api/memory/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: sessionMemoryInputEl?.value ?? "" }),
+  });
+  if (!res.ok) {
+    showToast("❌ workspace memory の保存に失敗しました", "error");
+    return;
+  }
+  showToast("✅ workspace memory を保存しました", "success");
 });
 
 btnSessionDeleteEl?.addEventListener("click", async () => {
@@ -4799,6 +5422,21 @@ btnAgentSaveEl?.addEventListener("click", async () => {
   if (Number(updatedAgent?.liveSessionWarningCount || 0) > 0) {
     showToast("⚠️ エージェントの設定が変更されました。必要に応じてセッションを再起動してください。", "warning", 6000);
   }
+});
+
+btnSaveAgentMemoryEl?.addEventListener("click", async () => {
+  const agentName = state.settingsAgentName || state.selectedAgent;
+  if (!agentName) return;
+  const res = await fetch(`/api/memory/agents/${encodeURIComponent(agentName)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: agentMemoryInputEl?.value ?? "" }),
+  });
+  if (!res.ok) {
+    showToast("❌ agent memory の保存に失敗しました", "error");
+    return;
+  }
+  showToast("✅ agent memory を保存しました", "success");
 });
 
 btnAgentDeleteEl?.addEventListener("click", async () => {
@@ -4892,37 +5530,12 @@ agentsListEl?.addEventListener("click", (event) => {
   void openAgentSettings(settingsButton.getAttribute("data-agent-card-settings"), state.workspaceId);
 });
 
-// ── Cost summary ──────────────────────────────────────────────────────────
-
-async function loadCostSummary() {
-  try {
-    const res = await fetch("/api/cost?period=month");
-    if (!res.ok) return;
-    const rows = await res.json();
-    // Attach cost to each agent in state and update sidebar
-    for (const row of rows) {
-      const agent = state.agents.find((a) => a.name === row.agentName);
-      if (agent) {
-        agent._costJpy = row.totalCostJpy;
-        agent._costUsd = row.totalCostUsd;
-      }
-      // Update cost badge in sidebar
-      const badge = document.getElementById(`cost-${row.agentName}`);
-      if (badge && row.totalCostUsd > 0) {
-        badge.textContent = `¥${row.totalCostJpy}`;
-        badge.style.display = "";
-      }
-    }
-  } catch {}
-}
-
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 async function boot() {
   await loadWorkspaces();
   await loadAgents();
   await loadDiscordChannels();
-  await loadCostSummary();
 
   const initialAgent =
     getWorkspaceParentAgentName(state.workspaceId) ||
@@ -4942,11 +5555,11 @@ async function boot() {
   configureAgentCreateControls(agentsCreateTypeEl?.value || "gemini", runtimeInfo);
 
   connectSSE();
+  void triggerActiveWorkspaceBootstrap({ force: true });
 
-  // Poll agent statuses every 5s; cost every 60s
+  // Poll agent statuses every 5s
   setInterval(loadAgents, 5000);
   setInterval(loadWorkspaces, 15_000);
-  setInterval(loadCostSummary, 60_000);
 }
 
 boot();

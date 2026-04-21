@@ -11,7 +11,7 @@ Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル U
 ## この README の前提
 
 - この README では `<repository-root>` を、このリポジトリを clone したフォルダとして表記します。
-- **正式名称は multiCLI-discord-base** ですが、ローカルのフォルダ名は任意です。今のチェックアウト先が `...\multicodi` のままでも動作します。
+- 正式運用パスは `C:\Users\sgmxk\Desktop\AI\repos\github\harunamitrader\multiCLI-discord-base` です。手動で別名 clone しても動作自体はしますが、既存の launcher / desktop shortcut / persisted default path はこのパスを前提にしています。
 - UI の正式ファイル名は `ui\multiCLI-discord-base.html` です。
 
 ## できること
@@ -26,6 +26,7 @@ Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル U
 - 途中応答を UI / Discord に段階的に反映する
 - scheduler から既存 workspace agent へ定期実行する
 - custom agent を UI から追加・編集する
+- chat bubble 内の URL / Windows path / `file:///` を開き、軽量 file viewer で中身を確認する
 
 ## 今の仕様で重要な前提
 
@@ -34,7 +35,7 @@ Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル U
 3. Chat / Terminal / Discord / Schedule は、同じ workspace x agent の**同じ stdin/stdout**を共有します。
 4. Discord は **1 channel ↔ 1 workspace** です。
 5. binding のない channel では、plain message で勝手に workspace を作りません。
-6. Discord slash command は廃止済みです。`!help`、`!status`、`!new`、`workspace?`、`agents?`、`stop?`、`agentName? prompt` を使います。
+6. Discord slash command は廃止済みです。`help!`、`status! [agent]`、`output! [agent]`、`enter! [agent]`、`approve! [agent]`、`deny! [agent]`、`bindings!`、`resume! [agent]`、`restart! [agent]`、`checkpoints!`、`rollback!`、`skills! [agent]`、`new!`、`workspace!`、`agents!`、`stop!`、`agentName? prompt` を使います。
 
 ## 対応 CLI
 
@@ -110,6 +111,10 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 FILE_WATCH_ENABLED=false
 FILE_WATCH_ROOT=
 FILE_LOG_CHANNEL_ID=
+
+# sensitive API を loopback 以外にも公開したい場合だけ設定
+MULTICLI_API_TOKEN=
+MULTICLI_API_ALLOW_LOOPBACK=true
 ```
 
 補足:
@@ -241,19 +246,38 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 
 主なコマンド:
 
-- `!help`
-- `!status`
-- `!new`
-- `workspace? <名前>`
-- `agents?`
-- `stop?`
+- `help!`
+- `status! [agent]`
+- `output! [agent]`
+- `enter! [agent]`
+- `approve! [agent]`
+- `deny! [agent]`
+- `bindings!`
+- `resume! [agent]`
+- `restart! [agent]`
+- `checkpoints!`
+- `checkpoints! create [label]`
+- `rollback! preview <checkpointId>`
+- `rollback! apply <checkpointId>`
+- `skills! [agent]`
+- `skills! apply [agent]`
+- `new!`
+- `workspace! <名前>`
+- `agents!`
+- `stop!`
 - `agentName? <prompt>`
 - plain `<prompt>`（binding 済み channel の parent agent へ送信）
 
 重要:
 
 - binding のない channel では、plain message だけでは workspace を自動作成しません
-- workspace を作るか紐づけるには `!new` または `workspace? <名前>` を使います
+- workspace を作るか紐づけるには `new!` または `workspace! <名前>` を使います
+- `status!` は workspace / default agent / 各 agent の PTY 状態を返し、`status! gemini` のように対象 agent を絞れます
+- `status!` には approval pending / quota wait / recovery warning / drift warning も含まれます
+- `output!` は shared PTY の最新出力を再掲し、`enter!` は新規 spawn せず既存 PTY に Enter だけを送ります
+- `approve!` / `deny!` は shared PTY 上の承認待ちへそのまま応答します
+- `bindings!` / `resume!` / `restart!` / `checkpoints!` / `rollback!` / `skills!` で、Discord から runtime 運用操作を行えます
+- `command!` 系は、**メッセージ冒頭から最初の `!` まで** が既知コマンド名と完全一致した時だけ command として認識します
 - slash command は廃止済みです
 
 ## 主要ファイル
@@ -299,8 +323,9 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 
 ## 現在の検証状態
 
-- repo 回帰 suite: `scripts\test-multiCLI-discord-base-extended.mjs`
-- 最新結果: **171 通過 / 0 失敗**
+- base 回帰 suite: `scripts\test-multiCLI-discord-base.mjs`
+- extended 回帰 suite: `scripts\test-multiCLI-discord-base-extended.mjs`
+- 最新結果: **73/73**（base）、**261/261**（extended）
 - stress test 台帳: **done 261 / pending 0**
 
 ## ライセンス

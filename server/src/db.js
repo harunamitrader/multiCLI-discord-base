@@ -58,6 +58,8 @@ export function createDatabase(databasePath, sessionDefaults) {
       id         TEXT PRIMARY KEY,
       name       TEXT NOT NULL,
       workdir    TEXT,
+      is_sidebar_active INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
       is_active  INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -106,14 +108,42 @@ export function createDatabase(databasePath, sessionDefaults) {
       created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key        TEXT PRIMARY KEY,
-      value      TEXT,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
+     CREATE TABLE IF NOT EXISTS app_settings (
+       key        TEXT PRIMARY KEY,
+       value      TEXT,
+       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+     );
 
-    CREATE INDEX IF NOT EXISTS idx_runs_agent_workspace
-    ON runs(agent_name, workspace_id, started_at);
+     CREATE TABLE IF NOT EXISTS git_checkpoints (
+       id           TEXT PRIMARY KEY,
+       workspace_id TEXT NOT NULL,
+       agent_name   TEXT,
+       run_id       TEXT,
+       kind         TEXT NOT NULL,
+       label        TEXT,
+       workdir      TEXT,
+       git_head_sha TEXT,
+       stash_ref    TEXT,
+       status_json  TEXT,
+       created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+     );
+
+     CREATE TABLE IF NOT EXISTS operation_audits (
+       id             TEXT PRIMARY KEY,
+       workspace_id   TEXT,
+       agent_name     TEXT,
+       operation_type TEXT NOT NULL,
+       target_ref     TEXT,
+       status         TEXT NOT NULL,
+       dry_run        INTEGER NOT NULL DEFAULT 0,
+       requested_by   TEXT,
+       source         TEXT,
+       details_json   TEXT,
+       created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+     );
+
+     CREATE INDEX IF NOT EXISTS idx_runs_agent_workspace
+     ON runs(agent_name, workspace_id, started_at);
 
     CREATE INDEX IF NOT EXISTS idx_messages_agent_workspace
     ON messages(agent_name, workspace_id, created_at);
@@ -127,15 +157,24 @@ export function createDatabase(databasePath, sessionDefaults) {
       PRIMARY KEY (workspace_id, agent_name)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace
-    ON workspace_agents(workspace_id);
-  `);
+     CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace
+     ON workspace_agents(workspace_id);
+
+     CREATE INDEX IF NOT EXISTS idx_git_checkpoints_workspace
+     ON git_checkpoints(workspace_id, created_at DESC);
+
+     CREATE INDEX IF NOT EXISTS idx_operation_audits_workspace
+     ON operation_audits(workspace_id, created_at DESC);
+   `);
 
   // --- New column migrations ---
   ensureColumn(db, "agents", "theme_color", "TEXT");
   ensureColumn(db, "agents", "enabled", "INTEGER DEFAULT 1");
   ensureColumn(db, "agents", "settings_json", "TEXT");
   ensureColumn(db, "workspaces", "parent_agent", "TEXT");
+  ensureColumn(db, "workspaces", "context_injection_enabled", "INTEGER");
+  ensureColumn(db, "workspaces", "is_sidebar_active", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "workspaces", "sort_order", "INTEGER NOT NULL DEFAULT 0");
 
   // --- Legacy column migrations ---
   ensureColumn(db, "sessions", "model", "TEXT");

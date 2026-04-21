@@ -8,102 +8,44 @@
  * PTY key: workspaceId:agentName (PtyService 側で管理)
  */
 
-import { calcCost } from "./pricing.js";
 import { normalizePersistedAssistantText } from "./pty-service.js";
-
-/** Cost period → ISO datetime */
-function periodToSince(period) {
-  if (!period || period === "all") return null;
-  const d = new Date();
-  if (period === "today") d.setHours(0, 0, 0, 0);
-  else if (period === "week") d.setDate(d.getDate() - 7);
-  else if (period === "month") d.setDate(d.getDate() - 30);
-  else return null;
-  return d.toISOString().slice(0, 19).replace("T", " ");
-}
-
-function getContextLimits(agentType) {
-  switch (agentType) {
-    case "codex":
-      return { maxMessages: 8, maxCharsPerMessage: 180, maxTotalChars: 1200 };
-    case "copilot":
-      return { maxMessages: 10, maxCharsPerMessage: 220, maxTotalChars: 1600 };
-    case "gemini":
-      return { maxMessages: 12, maxCharsPerMessage: 240, maxTotalChars: 1800 };
-    case "claude":
-    default:
-      return { maxMessages: 14, maxCharsPerMessage: 260, maxTotalChars: 2200 };
-  }
-}
-
-function sanitizeContextMessageContent(content) {
-  let cleaned = String(content || "")
-    .replace(/\u0007/g, "")
-    .replace(/\r/g, "");
-  cleaned = cleaned.replace(/\[Context from recent workspace chat\][\s\S]*?\[User prompt\]/g, "\n");
-  cleaned = cleaned.replace(/(?:^|\n)⚠\s*Heads up,[^\n]*(?:\nRun \/status[^\n]*)?/g, "\n");
-  cleaned = cleaned.replace(/(?:^|\n)You've hit your usage limit[^\n]*/g, "\n");
-  cleaned = cleaned.replace(/(?:^|\n)Codex の応答を抽出できませんでした。[^\n]*/g, "\n");
-  cleaned = cleaned.replace(/[ \t]+\n/g, "\n");
-  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  return cleaned.trim();
-}
-
-function filterContextMessages(messages) {
-  const completedRunIds = new Set(
-    messages
-      .filter((message) => message.role === "assistant" && message.runId)
-      .map((message) => message.runId),
-  );
-  return messages.filter((message) => {
-    if (message.role !== "user") return true;
-    if (!message.runId) return true;
-    return completedRunIds.has(message.runId);
-  });
-}
+import {
+  buildContextBlock,
+  resolveWorkspaceContextPolicy,
+} from "./context-policy.js";
 
 function normalizeAssistantMessageForStorage(agentType, text) {
   return normalizePersistedAssistantText(agentType, text);
 }
 
-/** Format workspace messages as a context block for PTY input. */
-function buildContextBlock(messages, agentType = "claude") {
-  if (!messages || messages.length === 0) return null;
-  const limits = getContextLimits(agentType);
-  const filteredMessages = filterContextMessages(messages);
-  const lines = [];
-  let totalChars = 0;
-  for (const m of filteredMessages.slice(-limits.maxMessages)) {
-    const speaker =
-      m.role === "user"
-        ? `You -> ${m.agentName}`
-        : `${m.agentName}`;
-    const body = sanitizeContextMessageContent(m.content).slice(0, limits.maxCharsPerMessage);
-    if (!body) continue;
-    const line = `${speaker}: ${body}`;
-    if (totalChars + line.length > limits.maxTotalChars) {
-      if (lines.length === 0) {
-        lines.push(line.slice(0, limits.maxTotalChars));
-      }
-      break;
-    }
-    lines.push(line);
-    totalChars += line.length + 1;
-  }
-  return lines.length > 0 ? lines.join("\n") : null;
+const TERMINAL_TURN_SOURCES = new Set([
+  "terminal",
+  "ui",
+  "discord",
+  "discord-slash",
+  "schedule",
+]);
+
+function normalizeTerminalTurnSource(source) {
+  const normalized = String(source ?? "").trim().toLowerCase();
+  return TERMINAL_TURN_SOURCES.has(normalized) ? normalized : "terminal";
 }
 
 export class AgentBridge {
   /**
-   * @param {{ agentRegistry, store, bus, config, ptyService?, scheduler? }} deps
+   * @param {{ agentRegistry, store, bus, config, ptyService?, scheduler?, memoryService?, memoryAutomationService?, gitService?, skillManager? }} deps
    */
-  constructor({ agentRegistry, store, bus, config, ptyService, scheduler }) {
+  constructor({ agentRegistry, store, bus, config, ptyService, scheduler, memoryService, memoryAutomationService, gitService, skillManager }) {
     this.agentRegistry = agentRegistry;
     this.store = store;
     this.bus = bus;
     this.config = config;
     this.ptyService = ptyService ?? null;
     this.scheduler = scheduler ?? null;
+    this.memoryService = memoryService ?? null;
+    this.memoryAutomationService = memoryAutomationService ?? null;
+    this.gitService = gitService ?? null;
+    this.skillManager = skillManager ?? null;
 
     agentRegistry.setStore(store);
     this.agentRegistry.hydrateFromStore?.();
@@ -113,6 +55,23 @@ export class AgentBridge {
         console.warn("[agent-bridge] failed to persist terminal turn:", error);
       });
     });
+    for (const approvalEventName of ["approval.requested", "approval.resolved", "approval.expired"]) {
+      this.bus?.on?.(approvalEventName, (payload) => {
+        try {
+          this.store.addOperationAudit({
+            workspaceId: payload?.workspaceId ?? null,
+            agentName: payload?.agentName ?? null,
+            operationType: approvalEventName,
+            targetRef: payload?.approval?.id ?? null,
+            status: payload?.approval?.status ?? "completed",
+            source: "pty",
+            details: payload ?? {},
+          });
+        } catch (error) {
+          console.warn("[agent-bridge] failed to persist approval audit:", error);
+        }
+      });
+    }
   }
 
   _syncAgentsToDb() {
@@ -131,11 +90,33 @@ export class AgentBridge {
     }
   }
 
+  _enrichWorkspace(workspace) {
+    if (!workspace) return null;
+    const workspaceAgentCount = this.store.countWorkspaceAgents(workspace.id);
+    return {
+      ...workspace,
+      contextPolicy: resolveWorkspaceContextPolicy({
+        workspace,
+        workspaceAgentCount,
+      }),
+    };
+  }
+
+  getWorkspaceContextPolicy(workspaceId, { requestedIncludeContext = true } = {}) {
+    const workspace = this.store.getWorkspace(workspaceId);
+    if (!workspace) return null;
+    return resolveWorkspaceContextPolicy({
+      workspace,
+      workspaceAgentCount: this.store.countWorkspaceAgents(workspaceId),
+      requestedIncludeContext,
+    });
+  }
+
   _resolvePromptTarget({ agentName, workspaceId = null, workdir }) {
     const agent = this.agentRegistry.get(agentName);
     if (!agent) {
       throw new Error(
-        `エージェント "${agentName}" が見つかりません。\`agents?\` で確認してください。`
+        `エージェント "${agentName}" が見つかりません。\`agents!\` で確認してください。`
       );
     }
     const workspace = workspaceId ? this.store.getWorkspace(workspaceId) : null;
@@ -176,6 +157,7 @@ export class AgentBridge {
    * @param {string} [opts.workdir]
    * @param {string} [opts.source]          "discord" | "ui" | "schedule" | "terminal"
    * @param {boolean} [opts.includeContext]
+   * @param {string} [opts.inputMode]       "prompt" | "slash_command"
    * @param {string} [opts.discordMessageId]
    * @param {Function} [opts.onProgress]    called with CanonicalEvents (for Discord live updates)
    * @returns {Promise<{ text: string }>}
@@ -187,6 +169,7 @@ export class AgentBridge {
     workdir,
     source = "ui",
     includeContext = true,
+    inputMode = "prompt",
     discordMessageId,
     onProgress,
     prepared = null,
@@ -200,6 +183,17 @@ export class AgentBridge {
       workspaceId,
       workdir,
     });
+
+    if (inputMode === "slash_command") {
+      return this.ptyService.sendRemoteCommand({
+        agentName,
+        workspaceId,
+        command: prompt,
+        workdir: effectiveWorkdir,
+        source,
+        metadata: { inputMode: "slash_command" },
+      });
+    }
 
     // 1. Start run record in DB
     const run = this.store.startRun({ agentName, workspaceId, prompt, source });
@@ -235,6 +229,29 @@ export class AgentBridge {
     }
 
     try {
+      const contextPolicy = this.getWorkspaceContextPolicy(workspaceId, { requestedIncludeContext: includeContext });
+      const recentMessages =
+        contextPolicy?.effective
+          ? this.store.listWorkspaceMessages(workspaceId, 21)
+            .filter((message) => !(message.role === "user" && message.runId === run.id))
+          : [];
+      const contextBlock =
+        contextPolicy?.effective
+          ? buildContextBlock(recentMessages, agent.type)
+          : null;
+      const userMessageMetadata = {
+        inputMode,
+      };
+      if (contextPolicy) {
+        userMessageMetadata.context = {
+          ...contextPolicy,
+          used: Boolean(contextBlock?.text),
+          messageCount: contextBlock?.messageCount ?? 0,
+          totalChars: contextBlock?.totalChars ?? 0,
+          maxTotalChars: contextBlock?.limits?.maxTotalChars ?? 0,
+        };
+      }
+
       // 2. Save user message
       this.store.addMessage({
         agentName,
@@ -242,26 +259,29 @@ export class AgentBridge {
         runId: run.id,
         role: "user",
         content: prompt,
+        metadata: userMessageMetadata,
         source,
       });
 
       // 3. Emit user events to EventBus
-      this._emit({ type: "message.user", agentName, content: prompt, source, runId: run.id, workspaceId, createdAt: new Date().toISOString() });
+      this._emit({
+        type: "message.user",
+        agentName,
+        content: prompt,
+        metadata: userMessageMetadata,
+        source,
+        runId: run.id,
+        workspaceId,
+        createdAt: new Date().toISOString(),
+      });
       this._emit({ type: "status.change", agentName, status: "running", source, workspaceId, runId: run.id, createdAt: new Date().toISOString() });
 
-      // 4. Build context from recent workspace messages (excluding the message just added)
-      const recentMessages = includeContext
-        ? this.store.listWorkspaceMessages(workspaceId, 21)
-          .filter((m) => !(m.role === "user" && m.runId === run.id))
-        : [];
-      const context = includeContext ? buildContextBlock(recentMessages, agent.type) : null;
-
-      // 5. Send via PTY — waits until heuristic completion (5s silence)
+      // 4. Send via PTY
       const result = await this.ptyService.sendPrompt({
         agentName,
         workspaceId,
         prompt,
-        context,
+        context: contextBlock?.text ?? null,
         runId: run.id,
         workdir: effectiveWorkdir,
       });
@@ -374,6 +394,45 @@ export class AgentBridge {
     return true;
   }
 
+  getRestartEligibility(agentName, workspaceId = null, options = {}) {
+    if (!workspaceId) {
+      return { allowed: false, blockedReasons: ["workspaceId is required"] };
+    }
+    return this.ptyService?.getRestartEligibility?.(agentName, workspaceId, options) ?? {
+      allowed: false,
+      blockedReasons: ["unavailable"],
+    };
+  }
+
+  async restartAgent(agentName, workspaceId = null, options = {}) {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    const eligibility = this.getRestartEligibility(agentName, workspaceId, options);
+    if (!eligibility.allowed) {
+      throw new Error((eligibility.blockedReasons || []).join(" / ") || "restart blocked");
+    }
+    const prepared = this._resolvePromptTarget({ agentName, workspaceId, workdir: options.workdir });
+    const state = await this.ptyService?.restartAgent?.(agentName, workspaceId, {
+      ...options,
+      workdir: prepared.effectiveWorkdir,
+    });
+    this.store.addOperationAudit({
+      workspaceId,
+      agentName,
+      operationType: options.force ? "pty.restart.force" : "pty.restart",
+      targetRef: `${workspaceId}:${agentName}`,
+      status: "completed",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+      details: {
+        force: Boolean(options.force),
+        state,
+      },
+    });
+    return state;
+  }
+
   stopAll() {
     this.ptyService?.stopAll();
     this.agentRegistry.stopAll();
@@ -408,20 +467,20 @@ export class AgentBridge {
   }
 
   listWorkspaces() {
-    return this.store.listWorkspaces();
+    return this.store.listWorkspaces().map((workspace) => this._enrichWorkspace(workspace));
   }
 
   getWorkspace(workspaceId) {
-    return this.store.getWorkspace(workspaceId);
+    return this._enrichWorkspace(this.store.getWorkspace(workspaceId));
   }
 
-  createWorkspace({ name, workdir, parentAgent }) {
-    const ws = this.store.createWorkspace({ name, workdir });
+  createWorkspace({ name, workdir, parentAgent, contextInjectionEnabled = null }) {
+    const ws = this.store.createWorkspace({ name, workdir, contextInjectionEnabled });
     // Register parent agent membership
     if (parentAgent && ws) {
       this.store.addWorkspaceAgent({ workspaceId: ws.id, agentName: parentAgent, isParent: true });
     }
-    return ws;
+    return this.getWorkspace(ws?.id);
   }
 
   async deleteWorkspace(id) {
@@ -441,7 +500,114 @@ export class AgentBridge {
   }
 
   renameWorkspace(id, name) {
-    return this.store.updateWorkspace(id, { name });
+    return this.updateWorkspace(id, { name });
+  }
+
+  updateWorkspace(id, patch = {}) {
+    return this._enrichWorkspace(this.store.updateWorkspace(id, patch));
+  }
+
+  updateWorkspaceLayout(items = []) {
+    const workspaces = this.store.listWorkspaces();
+    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    const submittedItems = Array.isArray(items) ? items : [];
+    if (submittedItems.length !== workspaces.length) {
+      throw new Error("workspace layout の件数が一致しません。");
+    }
+
+    const seenIds = new Set();
+    const normalizedItems = submittedItems.map((item, index) => {
+      const id = String(item?.id || "").trim();
+      if (!id || !workspaceIds.has(id)) {
+        throw new Error(`workspace "${id || index}" が見つかりません。`);
+      }
+      if (seenIds.has(id)) {
+        throw new Error(`workspace "${id}" が重複しています。`);
+      }
+      seenIds.add(id);
+      return {
+        id,
+        isSidebarActive: Boolean(item?.isSidebarActive),
+        sortOrder: Math.max(0, Number(item?.sortOrder) || 0),
+      };
+    });
+
+    const sortWithinSection = (left, right) => left.sortOrder - right.sortOrder;
+    const active = normalizedItems.filter((item) => item.isSidebarActive).sort(sortWithinSection);
+    const inactive = normalizedItems.filter((item) => !item.isSidebarActive).sort(sortWithinSection);
+    const cappedActive = active.slice(0, 5).map((item, index) => ({
+      ...item,
+      isSidebarActive: true,
+      sortOrder: index,
+    }));
+    const normalizedInactive = [...active.slice(5), ...inactive].map((item, index) => ({
+      ...item,
+      isSidebarActive: false,
+      sortOrder: index,
+    }));
+
+    const saved = this.store.saveWorkspaceLayout([...cappedActive, ...normalizedInactive]);
+    return saved.map((workspace) => this._enrichWorkspace(workspace));
+  }
+
+  async prewarmWorkspaceAgent(agentName, workspaceId, { workdir = null, waitForReadyMs = 4000 } = {}) {
+    if (!workspaceId || !agentName) {
+      throw new Error("workspaceId と agentName は必須です。");
+    }
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`ワークスペース "${workspaceId}" が見つかりません。`);
+    }
+    const membership = this.store.listWorkspaceAgents(workspaceId).find((entry) => entry.agentName === agentName);
+    if (!membership) {
+      throw new Error(`${agentName} は workspace "${workspace.name}" に属していません。`);
+    }
+    const { effectiveWorkdir } = this._resolvePromptTarget({ agentName, workspaceId, workdir });
+    return await this.ptyService.prewarmAgent({
+      agentName,
+      workspaceId,
+      workdir: effectiveWorkdir,
+      waitForReadyMs,
+    });
+  }
+
+  listResumeBindings(workspaceId = null) {
+    const sessions = workspaceId
+      ? this.store.listAgentSessionsByWorkspace(workspaceId)
+      : this.store.listAllAgentSessions();
+    return sessions.map((session) => {
+      const workspace = this.getWorkspace(session.workspaceId);
+      const workspaceAgents = workspace ? this.store.listWorkspaceAgents(session.workspaceId) : [];
+      const membership = workspaceAgents.find((entry) => entry.agentName === session.agentName) ?? null;
+      const validation = this.ptyService?.validateStoredSessionBinding?.(
+        session.agentName,
+        session.workspaceId,
+      ) ?? { valid: true, reasons: [] };
+      return {
+        ...session,
+        workspaceName: workspace?.name ?? null,
+        stale: !workspace || !membership || !validation.valid,
+        reasons: [
+          ...(workspace ? [] : ["workspace が存在しません。"]),
+          ...(membership ? [] : ["workspace agent binding が存在しません。"]),
+          ...(validation.reasons ?? []),
+        ],
+      };
+    });
+  }
+
+  async resumeAgentSession(agentName, workspaceId, options = {}) {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    const binding = this.listResumeBindings(workspaceId).find((entry) => entry.agentName === agentName);
+    if (!binding) {
+      throw new Error("resume binding が見つかりません。");
+    }
+    if (binding.stale) {
+      throw new Error(binding.reasons.join(" / ") || "stale binding");
+    }
+    return this.prewarmWorkspaceAgent(agentName, workspaceId, options);
   }
 
   // ---------------------------------------------------------------------------
@@ -497,6 +663,277 @@ export class AgentBridge {
       runId: null,
       readyForPrompt: false,
     };
+  }
+
+  listWorkspaceTerminalStates(workspaceId) {
+    if (!workspaceId) {
+      return [];
+    }
+    if (this.ptyService?.listWorkspaceTerminalStates) {
+      return this.ptyService.listWorkspaceTerminalStates(workspaceId);
+    }
+    return this.listWorkspaceAgents(workspaceId).map((entry) => ({
+      agentName: entry.agentName,
+      workspaceId,
+      ...this.getAgentTerminalState(entry.agentName, workspaceId),
+    }));
+  }
+
+  getAgentTerminalOutput(agentName, workspaceId = null, options = {}) {
+    if (this.ptyService?.getAgentTerminalOutput) {
+      return this.ptyService.getAgentTerminalOutput(agentName, workspaceId, options);
+    }
+    return {
+      ...this.getAgentTerminalState(agentName, workspaceId),
+      text: "",
+      totalLineCount: 0,
+      lineLimit: Number.isFinite(options?.lineLimit) ? options.lineLimit : 50,
+      truncated: false,
+    };
+  }
+
+  sendTerminalInput(agentName, workspaceId = null, data = "", options = {}) {
+    if (!workspaceId) {
+      return { ok: false, reason: "workspace_required" };
+    }
+    if (this.ptyService?.sendTerminalInput) {
+      return this.ptyService.sendTerminalInput(agentName, workspaceId, data, options);
+    }
+    return {
+      ok: false,
+      reason: "unavailable",
+      state: this.getAgentTerminalState(agentName, workspaceId),
+    };
+  }
+
+  async sendRemoteCommand(agentName, workspaceId = null, command = "", options = {}) {
+    if (!workspaceId) {
+      throw new Error("workspaceId is required");
+    }
+    const normalizedCommand = String(command ?? "").trim();
+    if (!normalizedCommand.startsWith("/")) {
+      throw new Error("slash command must start with /");
+    }
+    if (/[\r\n]/u.test(normalizedCommand)) {
+      throw new Error("slash command must be a single line");
+    }
+    const prepared = await this.preparePrompt({
+      agentName,
+      workspaceId,
+      workdir: options.workdir,
+    });
+    return this.ptyService?.sendRemoteCommand?.({
+      agentName,
+      workspaceId,
+      command: normalizedCommand,
+      workdir: prepared.effectiveWorkdir,
+      source: options.source ?? "ui",
+      metadata: options.metadata ?? { inputMode: "slash_command" },
+    }) ?? { ok: false, reason: "unavailable" };
+  }
+
+  getAgentApprovalState(agentName, workspaceId = null) {
+    return this.ptyService?.getAgentApprovalState?.(agentName, workspaceId) ?? null;
+  }
+
+  respondToApproval(agentName, workspaceId = null, decision, options = {}) {
+    if (!workspaceId) {
+      return { ok: false, reason: "workspace_required" };
+    }
+    return this.ptyService?.respondToApproval?.(agentName, workspaceId, decision, options) ?? {
+      ok: false,
+      reason: "unavailable",
+      state: this.getAgentTerminalState(agentName, workspaceId),
+    };
+  }
+
+  listOperationAudits(workspaceId = null, limit = 50) {
+    return this.store.listOperationAudits(workspaceId, limit);
+  }
+
+  createWorkspaceCheckpoint(workspaceId, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.gitService?.createCheckpoint?.({
+      workspaceId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+      agentName: options.agentName ?? null,
+      runId: options.runId ?? null,
+      kind: options.kind ?? "manual",
+      label: options.label ?? "",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+    }) ?? null;
+  }
+
+  listWorkspaceCheckpoints(workspaceId, limit = 20) {
+    return this.gitService?.listCheckpoints?.(workspaceId, { limit }) ?? [];
+  }
+
+  previewWorkspaceRollback(workspaceId, checkpointId, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.gitService?.previewRollback?.({
+      workspaceId,
+      checkpointId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+      source: options.source ?? "ui",
+    }) ?? null;
+  }
+
+  applyWorkspaceRollback(workspaceId, checkpointId, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.gitService?.applyRollback?.({
+      workspaceId,
+      checkpointId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+      approved: Boolean(options.approved),
+      dryRun: Boolean(options.dryRun),
+    }) ?? null;
+  }
+
+  restoreRuntimeSnapshot() {
+    return this.ptyService?.restoreRuntimeSnapshot?.() ?? { restoredCount: 0, recoveredCount: 0 };
+  }
+
+  getGlobalMemory() {
+    return this.memoryService?.getGlobalMemory?.() ?? { scope: "global", content: "", path: "" };
+  }
+
+  updateGlobalMemory(content = "") {
+    return this.memoryService?.setGlobalMemory?.(content) ?? { scope: "global", content: "", path: "" };
+  }
+
+  getWorkspaceMemory(workspaceId) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.memoryService?.getWorkspaceMemory?.(workspaceId) ?? {
+      scope: "workspace",
+      workspaceId,
+      content: "",
+      path: "",
+    };
+  }
+
+  updateWorkspaceMemory(workspaceId, content = "") {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.memoryService?.setWorkspaceMemory?.(workspaceId, content) ?? {
+      scope: "workspace",
+      workspaceId,
+      content: "",
+      path: "",
+    };
+  }
+
+  getAgentMemory(agentName) {
+    if (!this.agentRegistry.get(agentName)) {
+      throw new Error(`エージェント "${agentName}" が見つかりません。`);
+    }
+    return this.memoryService?.getAgentMemory?.(agentName) ?? {
+      scope: "agent",
+      agentName,
+      content: "",
+      path: "",
+    };
+  }
+
+  updateAgentMemory(agentName, content = "") {
+    if (!this.agentRegistry.get(agentName)) {
+      throw new Error(`エージェント "${agentName}" が見つかりません。`);
+    }
+    return this.memoryService?.setAgentMemory?.(agentName, content) ?? {
+      scope: "agent",
+      agentName,
+      content: "",
+      path: "",
+    };
+  }
+
+  previewWorkspaceConsolidation(workspaceId) {
+    return this.memoryAutomationService?.previewWorkspaceConsolidation?.(workspaceId) ?? null;
+  }
+
+  applyWorkspaceConsolidation(workspaceId, options = {}) {
+    const result = this.memoryAutomationService?.applyWorkspaceConsolidation?.(workspaceId, options) ?? null;
+    if (result) {
+      this.store.addOperationAudit({
+        workspaceId,
+        operationType: "memory.consolidation",
+        targetRef: workspaceId,
+        status: "completed",
+        requestedBy: options.requestedBy ?? "system",
+        source: options.source ?? "ui",
+        details: {
+          backupPath: result.backupPath,
+          tokenEstimate: result.tokenEstimate,
+        },
+      });
+    }
+    return result;
+  }
+
+  previewWorkspaceDiary(workspaceId) {
+    return this.memoryAutomationService?.previewWorkspaceDiary?.(workspaceId) ?? null;
+  }
+
+  applyWorkspaceDiary(workspaceId, options = {}) {
+    const result = this.memoryAutomationService?.applyWorkspaceDiary?.(workspaceId, options) ?? null;
+    if (result) {
+      this.store.addOperationAudit({
+        workspaceId,
+        operationType: "memory.ai_diary",
+        targetRef: workspaceId,
+        status: "completed",
+        requestedBy: options.requestedBy ?? "system",
+        source: options.source ?? "ui",
+        details: {
+          diaryPath: result.diaryPath,
+          backupPath: result.backupPath,
+          tokenEstimate: result.tokenEstimate,
+        },
+      });
+    }
+    return result;
+  }
+
+  getSkillRegistry() {
+    return this.skillManager?.getRegistrySummary?.() ?? null;
+  }
+
+  planWorkspaceSkillSync(workspaceId, options = {}) {
+    return this.skillManager?.planWorkspaceSync?.(workspaceId, options) ?? null;
+  }
+
+  applyWorkspaceSkillSync(workspaceId, options = {}) {
+    const result = this.skillManager?.applyWorkspaceSync?.(workspaceId, options) ?? null;
+    if (result) {
+      this.store.addOperationAudit({
+        workspaceId,
+        operationType: "skills.sync",
+        targetRef: workspaceId,
+        status: "completed",
+        requestedBy: options.requestedBy ?? "system",
+        source: options.source ?? "ui",
+        details: {
+          appliedCount: Array.isArray(result.applied) ? result.applied.length : 0,
+        },
+      });
+    }
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -556,11 +993,6 @@ export class AgentBridge {
 
   listRuns(agentName, workspaceId = null, limit = 20) {
     return this.store.listRuns(agentName, workspaceId, limit);
-  }
-
-  getCostSummary({ agentName, workspaceId, period = "all" } = {}) {
-    const since = periodToSince(period);
-    return this.store.getCostSummary({ agentName, workspaceId, since });
   }
 
   // ---------------------------------------------------------------------------
@@ -674,17 +1106,20 @@ export class AgentBridge {
     prompt,
     text = "",
     finalStatus = "completed",
+    source = "terminal",
+    metadata = null,
   }) {
     const agent = this.agentRegistry.get(agentName);
-    const workspace = this.store.getWorkspace(workspaceId);
+    const workspace = this.getWorkspace(workspaceId);
     const normalizedPrompt = String(prompt ?? "").trim();
+    const normalizedSource = normalizeTerminalTurnSource(source);
     if (!agent || !workspace || !normalizedPrompt) return;
 
     const run = this.store.startRun({
       agentName,
       workspaceId,
       prompt: normalizedPrompt,
-      source: "terminal",
+      source: normalizedSource,
     });
 
     this.store.addMessage({
@@ -693,19 +1128,22 @@ export class AgentBridge {
       runId: run.id,
       role: "user",
       content: normalizedPrompt,
-      source: "terminal",
+      metadata,
+      source: normalizedSource,
     });
     this._emit({
       type: "message.user",
       agentName,
       content: normalizedPrompt,
-      source: "terminal",
+      metadata,
+      source: normalizedSource,
       runId: run.id,
       workspaceId,
     });
 
     const runStatus =
       finalStatus === "waiting_input" ? "waiting_input" :
+      finalStatus === "quota_wait"    ? "quota_wait" :
       finalStatus === "timeout"       ? "timeout" :
       finalStatus === "error"         ? "error" :
       "completed";
@@ -739,7 +1177,7 @@ export class AgentBridge {
       content: shouldPersistAssistantText ? normalizedText : "",
       runId: run.id,
       workspaceId,
-      source: "terminal",
+      source: normalizedSource,
     });
   }
 

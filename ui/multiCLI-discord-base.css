@@ -144,16 +144,6 @@ html, body { height: 100%; overflow: hidden; }
 .agent-name { font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-type { font-size: 11px; color: var(--text-muted); }
 
-.cost-badge {
-  font-size: 10px;
-  color: #faa61a;
-  background: rgba(250,166,26,0.15);
-  border-radius: 8px;
-  padding: 1px 5px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
 .loading-note { padding: 12px; font-size: 12px; color: var(--text-muted); }
 
 .sidebar-footer {
@@ -531,6 +521,12 @@ html, body { height: 100%; overflow: hidden; }
   background: rgba(241,196,15,0.18);
   border-color: rgba(241,196,15,0.45);
   color: #ffe16a;
+}
+
+.terminal-status-badge.quota_wait {
+  background: rgba(96,165,250,0.18);
+  border-color: rgba(96,165,250,0.45);
+  color: #bfdbfe;
 }
 
 .terminal-status-badge.error {
@@ -1733,8 +1729,51 @@ body {
 .session-sidebar {
   flex: 1;
   overflow: auto;
-  padding: 14px 14px 18px;
+  padding: 12px 12px 16px;
   scrollbar-gutter: stable;
+}
+
+.session-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.session-sidebar-section.drop-target {
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.session-sidebar-section-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px;
+}
+
+.session-sidebar-section-title {
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.session-sidebar-section-hint,
+.session-sidebar-section-empty {
+  color: rgba(226, 232, 240, 0.66);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.session-sidebar-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .sidebar-footer {
@@ -1758,7 +1797,7 @@ body {
 }
 
 .session-create-card {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .session-create-btn {
@@ -1766,8 +1805,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 16px 18px;
+  gap: 10px;
+  padding: 12px 14px;
   border: 0;
   background: linear-gradient(180deg, rgba(90, 125, 232, 0.34) 0%, rgba(65, 92, 186, 0.16) 100%);
   color: #ffffff;
@@ -1812,8 +1851,9 @@ body {
 }
 
 .session-card-header {
+  display: flex;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
 }
 
 .session-card-header:hover {
@@ -1823,30 +1863,58 @@ body {
 .session-card-main {
   display: flex;
   flex-direction: column;
-  padding: 18px 18px 16px;
+  flex: 1;
+  padding: 12px 12px 10px;
   align-items: flex-start;
-  gap: 10px;
+  gap: 6px;
+}
+
+.session-drag-handle {
+  flex: 0 0 auto;
+  width: 34px;
+  border: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(226, 232, 240, 0.72);
+  cursor: grab;
+  font-size: 14px;
+}
+
+.session-card.dragging .session-drag-handle,
+.session-drag-handle:active {
+  cursor: grabbing;
+}
+
+.session-card.drop-target {
+  border-color: rgba(96, 165, 250, 0.45);
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, 0.35),
+    0 14px 28px rgba(7, 15, 30, 0.22);
+}
+
+.session-card.dragging {
+  opacity: 0.68;
 }
 
 .session-card-title {
   color: #ffffff;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.25;
   overflow-wrap: anywhere;
 }
 
 .session-card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   color: rgba(226, 232, 240, 0.78);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .session-card-actions {
-  gap: 8px;
-  padding: 14px 14px 0 0;
+  gap: 6px;
+  padding: 10px 10px 0 0;
 }
 
 .session-action-btn,
@@ -1875,6 +1943,7 @@ body {
 .session-agent-chip,
 .agent-card-chip,
 .msg-agent-chip,
+.msg-input-meta-chip,
 .msg-target-chip,
 .msg-author-chip,
 .tool-card-badge {
@@ -1898,8 +1967,8 @@ body {
 }
 
 .session-card-accordion {
-  padding: 0 12px 14px;
-  gap: 10px;
+  padding: 0 8px 10px;
+  gap: 8px;
 }
 
 .session-card-accordion[hidden] {
@@ -1919,8 +1988,8 @@ body {
   content: "";
   position: absolute;
   left: 0;
-  top: 12px;
-  bottom: 12px;
+  top: 8px;
+  bottom: 8px;
   width: 3px;
   border-radius: 999px;
   background: var(--agent-accent);
@@ -1937,38 +2006,40 @@ body {
 .session-agent-main {
   display: flex;
   flex-direction: column;
-  padding: 14px 14px 14px 0;
+  padding: 9px 10px 9px 0;
 }
 
 .session-agent-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }
 
 .session-agent-name {
   color: #ffffff;
+  font-size: 13px;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
 .session-agent-meta {
   color: rgba(226, 232, 240, 0.72);
+  font-size: 11px;
   overflow-wrap: anywhere;
 }
 
 .session-agent-actions {
   align-items: center;
-  padding-right: 10px;
+  padding-right: 8px;
 }
 
 .session-empty-agent-slot {
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 10px 12px;
   color: rgba(226, 232, 240, 0.7);
 }
 
@@ -2154,6 +2225,67 @@ body {
     0 20px 40px rgba(15, 23, 42, 0.08);
 }
 
+.chat-file-viewer {
+  margin: 14px 18px 0;
+  padding: 14px 16px 16px;
+  border: 1px solid rgba(135, 154, 190, 0.42);
+  border-radius: 24px;
+  background: rgba(248, 250, 252, 0.96);
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.08);
+}
+
+.chat-file-viewer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chat-file-viewer-title {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.chat-file-viewer-path {
+  margin-top: 4px;
+  color: #0f172a;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.chat-file-viewer-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.chat-file-viewer-open {
+  text-decoration: none;
+}
+
+.chat-file-viewer-meta {
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.chat-file-viewer-content {
+  margin: 12px 0 0;
+  padding: 14px 16px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.92);
+  color: #e2e8f0;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 .empty-chat {
   max-width: 420px;
   margin: auto;
@@ -2324,6 +2456,22 @@ body {
   padding: 0.12em 0.4em;
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.08);
+}
+
+.msg-link,
+.msg-file-link {
+  color: #2563eb;
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.msg-file-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
 }
 
 .msg-bubble .msg-code-block {
@@ -2538,6 +2686,30 @@ body {
   color: #fde68a;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.terminal-approval-banner {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(59, 130, 246, 0.16);
+  color: #dbeafe;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.terminal-approval-text {
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.terminal-approval-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .terminal-actions {

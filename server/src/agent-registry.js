@@ -2,7 +2,6 @@ import { CodexAdapter } from "./codex-adapter.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { GeminiAdapter } from "./gemini-adapter.js";
 import { CopilotAdapter } from "./copilot-adapter.js";
-import { formatUsage } from "./pricing.js";
 
 const MAX_AGENTS = 10;
 const SUPPORTED_AGENT_TYPES = new Set(["claude", "gemini", "copilot", "codex"]);
@@ -106,7 +105,7 @@ class AgentInstance {
    */
   async run({ prompt, workdir, onCanonicalEvent }) {
     if (this.status === "running") {
-      throw new Error(`${this.name} は実行中です。\`${this.name} stop?\` でキャンセルしてください。`);
+      throw new Error(`${this.name} は実行中です。\`${this.name} stop!\` でキャンセルしてください。`);
     }
 
     this.status = "running";
@@ -493,5 +492,3 @@ export class AgentRegistry {
     return agent.toJSON();
   }
 }
-
-export { formatUsage };
