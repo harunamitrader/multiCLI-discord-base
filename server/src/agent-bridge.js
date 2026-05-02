@@ -8,6 +8,7 @@
  * PTY key: workspaceId:agentName (PtyService 側で管理)
  */
 
+import { randomUUID } from "node:crypto";
 import { normalizePersistedAssistantText } from "./pty-service.js";
 import {
   buildContextBlock,
@@ -16,6 +17,43 @@ import {
 
 function normalizeAssistantMessageForStorage(agentType, text) {
   return normalizePersistedAssistantText(agentType, text);
+}
+
+function normalizePromptPreludeText(value = "") {
+  return String(value ?? "").replace(/\r/g, "").trim();
+}
+
+function buildPromptPrelude({
+  instructions = "",
+  agentMemory = "",
+  workspaceMemory = "",
+  workspaceProfile = "",
+  recentChat = "",
+} = {}) {
+  const sections = [];
+  const normalizedInstructions = normalizePromptPreludeText(instructions);
+  const normalizedAgentMemory = normalizePromptPreludeText(agentMemory);
+  const normalizedWorkspaceMemory = normalizePromptPreludeText(workspaceMemory);
+  const normalizedWorkspaceProfile = normalizePromptPreludeText(workspaceProfile);
+  const normalizedRecentChat = normalizePromptPreludeText(recentChat);
+
+  if (normalizedInstructions) {
+    sections.push(`[Agent instructions]\n${normalizedInstructions}`);
+  }
+  if (normalizedAgentMemory) {
+    sections.push(`[Agent memory]\n${normalizedAgentMemory}`);
+  }
+  if (normalizedWorkspaceMemory) {
+    sections.push(`[Workspace memory]\n${normalizedWorkspaceMemory}`);
+  }
+  if (normalizedWorkspaceProfile) {
+    sections.push(`[Workspace profile]\n${normalizedWorkspaceProfile}`);
+  }
+  if (normalizedRecentChat) {
+    sections.push(`[Recent workspace chat]\n${normalizedRecentChat}`);
+  }
+
+  return sections.length > 0 ? sections.join("\n\n") : null;
 }
 
 const TERMINAL_TURN_SOURCES = new Set([
@@ -31,11 +69,76 @@ function normalizeTerminalTurnSource(source) {
   return TERMINAL_TURN_SOURCES.has(normalized) ? normalized : "terminal";
 }
 
+function coordinationSettingKey(workspaceId) {
+  return `workspace_coordination:${workspaceId}`;
+}
+
+function normalizeTaskText(value = "") {
+  return String(value ?? "").replace(/\r/g, "").trim();
+}
+
+function compareIsoTimestampsDesc(left = "", right = "") {
+  return String(right || "").localeCompare(String(left || ""));
+}
+
+function createEmptyTaskContext(workspaceId) {
+  return {
+    workspaceId,
+    ownerAgentName: null,
+    currentTask: null,
+    claims: [],
+    handoffQueue: [],
+    updatedAt: null,
+  };
+}
+
+const WORKSPACE_PROFILE_DEFAULTS = Object.freeze({
+  mode: "standard",
+  persona: "balanced",
+  autonomy: "guided",
+  notes: "",
+});
+
+function workspaceProfileSettingKey(workspaceId) {
+  return `workspace_profile:${workspaceId}`;
+}
+
+function normalizeWorkspaceProfile(profile = {}) {
+  const mode = String(profile?.mode ?? WORKSPACE_PROFILE_DEFAULTS.mode).trim().toLowerCase();
+  const persona = String(profile?.persona ?? WORKSPACE_PROFILE_DEFAULTS.persona).trim().toLowerCase();
+  const autonomy = String(profile?.autonomy ?? WORKSPACE_PROFILE_DEFAULTS.autonomy).trim().toLowerCase();
+  const notes = normalizePromptPreludeText(profile?.notes ?? "");
+  return {
+    mode: ["standard", "research", "execution", "review"].includes(mode) ? mode : WORKSPACE_PROFILE_DEFAULTS.mode,
+    persona: ["balanced", "careful", "assertive", "mentor"].includes(persona) ? persona : WORKSPACE_PROFILE_DEFAULTS.persona,
+    autonomy: ["guided", "semi", "high"].includes(autonomy) ? autonomy : WORKSPACE_PROFILE_DEFAULTS.autonomy,
+    notes,
+  };
+}
+
+function buildWorkspaceProfilePrelude(profile = null) {
+  const normalized = normalizeWorkspaceProfile(profile ?? {});
+  const lines = [];
+  if (normalized.mode !== WORKSPACE_PROFILE_DEFAULTS.mode) {
+    lines.push(`Mode: ${normalized.mode}`);
+  }
+  if (normalized.persona !== WORKSPACE_PROFILE_DEFAULTS.persona) {
+    lines.push(`Persona: ${normalized.persona}`);
+  }
+  if (normalized.autonomy !== WORKSPACE_PROFILE_DEFAULTS.autonomy) {
+    lines.push(`Autonomy: ${normalized.autonomy}`);
+  }
+  if (normalized.notes) {
+    lines.push(`Notes:\n${normalized.notes}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : "";
+}
+
 export class AgentBridge {
   /**
-   * @param {{ agentRegistry, store, bus, config, ptyService?, scheduler?, memoryService?, memoryAutomationService?, gitService?, skillManager? }} deps
+   * @param {{ agentRegistry, store, bus, config, ptyService?, scheduler?, memoryService?, memoryAutomationService?, gitService?, skillManager?, lockManager?, mcpManager? }} deps
    */
-  constructor({ agentRegistry, store, bus, config, ptyService, scheduler, memoryService, memoryAutomationService, gitService, skillManager }) {
+  constructor({ agentRegistry, store, bus, config, ptyService, scheduler, memoryService, memoryAutomationService, gitService, skillManager, lockManager, mcpManager }) {
     this.agentRegistry = agentRegistry;
     this.store = store;
     this.bus = bus;
@@ -46,6 +149,8 @@ export class AgentBridge {
     this.memoryAutomationService = memoryAutomationService ?? null;
     this.gitService = gitService ?? null;
     this.skillManager = skillManager ?? null;
+    this.lockManager = lockManager ?? null;
+    this.mcpManager = mcpManager ?? null;
 
     agentRegistry.setStore(store);
     this.agentRegistry.hydrateFromStore?.();
@@ -110,6 +215,34 @@ export class AgentBridge {
       workspaceAgentCount: this.store.countWorkspaceAgents(workspaceId),
       requestedIncludeContext,
     });
+  }
+
+  getWorkspaceProfile(workspaceId) {
+    const workspace = this.store.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return {
+      workspaceId,
+      workspaceName: workspace.name,
+      ...normalizeWorkspaceProfile(
+        this.store.getJsonAppSetting(workspaceProfileSettingKey(workspaceId), WORKSPACE_PROFILE_DEFAULTS),
+      ),
+    };
+  }
+
+  updateWorkspaceProfile(workspaceId, patch = {}) {
+    const current = this.getWorkspaceProfile(workspaceId);
+    const next = normalizeWorkspaceProfile({
+      ...current,
+      ...patch,
+    });
+    this.store.setJsonAppSetting(workspaceProfileSettingKey(workspaceId), next);
+    return {
+      workspaceId,
+      workspaceName: current.workspaceName,
+      ...next,
+    };
   }
 
   _resolvePromptTarget({ agentName, workspaceId = null, workdir }) {
@@ -239,6 +372,16 @@ export class AgentBridge {
         contextPolicy?.effective
           ? buildContextBlock(recentMessages, agent.type)
           : null;
+      const promptPrelude = buildPromptPrelude({
+        instructions: agent.settings?.instructions,
+        agentMemory: this.memoryService?.getAgentMemory?.(agentName)?.content ?? "",
+        workspaceMemory:
+          workspaceId && contextPolicy?.effective
+            ? this.memoryService?.getWorkspaceMemory?.(workspaceId)?.content ?? ""
+            : "",
+        workspaceProfile: workspaceId ? buildWorkspaceProfilePrelude(this.getWorkspaceProfile(workspaceId)) : "",
+        recentChat: contextBlock?.text ?? "",
+      });
       const userMessageMetadata = {
         inputMode,
       };
@@ -281,7 +424,7 @@ export class AgentBridge {
         agentName,
         workspaceId,
         prompt,
-        context: contextBlock?.text ?? null,
+        context: promptPrelude,
         runId: run.id,
         workdir: effectiveWorkdir,
       });
@@ -324,6 +467,13 @@ export class AgentBridge {
         runId: run.id,
         createdAt: new Date().toISOString(),
       });
+      if (runStatus === "timeout") {
+        this.releaseTask(workspaceId, agentName, {
+          requestedBy: "system",
+          source,
+          reason: "timeout",
+        });
+      }
 
       return { text };
     } catch (err) {
@@ -353,6 +503,13 @@ export class AgentBridge {
         runId: run.id,
         createdAt: new Date().toISOString(),
       });
+      if (cancelled) {
+        this.releaseTask(workspaceId, agentName, {
+          requestedBy: "system",
+          source,
+          reason: "cancelled",
+        });
+      }
 
       throw err;
     } finally {
@@ -373,6 +530,12 @@ export class AgentBridge {
     // Also cancel any in-flight adapter run (legacy fallback)
     const agent = this.agentRegistry.get(agentName);
     if (agent) agent.cancel?.();
+    this.releaseTask(workspaceId, agentName, {
+      requestedBy: "system",
+      source: "pty",
+      reason: "cancelled",
+      silent: true,
+    });
     this._emit({ type: "status.change", agentName, status: "idle", workspaceId });
     return killed;
   }
@@ -389,6 +552,12 @@ export class AgentBridge {
       workspaceId,
       providerSessionRef: null,
       lastRunState: "idle",
+    });
+    this.releaseTask(workspaceId, agentName, {
+      requestedBy: "system",
+      source: "pty",
+      reason: "reset",
+      silent: true,
     });
     this._emit({ type: "status.change", agentName, status: "idle", workspaceId });
     return true;
@@ -434,6 +603,20 @@ export class AgentBridge {
   }
 
   stopAll() {
+    for (const workspace of this.store.listWorkspaces()) {
+      this.clearTaskContext(workspace.id, {
+        requestedBy: "system",
+        source: "system",
+        reason: "stop_all",
+        silent: true,
+      });
+      this.lockManager?.clearWorkspaceLocks?.(workspace.id, {
+        requestedBy: "system",
+        source: "system",
+        reason: "stop_all",
+        silent: true,
+      });
+    }
     this.ptyService?.stopAll();
     this.agentRegistry.stopAll();
   }
@@ -492,6 +675,18 @@ export class AgentBridge {
     }
     await this.scheduler?.removeJobsReferencingWorkspace?.(id);
     this.ptyService?.killWorkspace?.(id);
+    this.clearTaskContext(id, {
+      requestedBy: "system",
+      source: "system",
+      reason: "workspace_deleted",
+      silent: true,
+    });
+    this.lockManager?.clearWorkspaceLocks?.(id, {
+      requestedBy: "system",
+      source: "system",
+      reason: "workspace_deleted",
+      silent: true,
+    });
     const deleted = this.store.deleteWorkspace(id);
     const nextWorkspaceId = this.store.getActiveWorkspace()?.id ?? null;
     await this.agentRegistry.switchWorkspace(nextWorkspaceId);
@@ -527,26 +722,19 @@ export class AgentBridge {
       seenIds.add(id);
       return {
         id,
-        isSidebarActive: Boolean(item?.isSidebarActive),
         sortOrder: Math.max(0, Number(item?.sortOrder) || 0),
       };
     });
 
-    const sortWithinSection = (left, right) => left.sortOrder - right.sortOrder;
-    const active = normalizedItems.filter((item) => item.isSidebarActive).sort(sortWithinSection);
-    const inactive = normalizedItems.filter((item) => !item.isSidebarActive).sort(sortWithinSection);
-    const cappedActive = active.slice(0, 5).map((item, index) => ({
-      ...item,
-      isSidebarActive: true,
-      sortOrder: index,
-    }));
-    const normalizedInactive = [...active.slice(5), ...inactive].map((item, index) => ({
-      ...item,
-      isSidebarActive: false,
-      sortOrder: index,
-    }));
-
-    const saved = this.store.saveWorkspaceLayout([...cappedActive, ...normalizedInactive]);
+    const saved = this.store.saveWorkspaceLayout(
+      normalizedItems
+        .sort((left, right) => left.sortOrder - right.sortOrder)
+        .map((item, index) => ({
+          ...item,
+          isSidebarActive: true,
+          sortOrder: index,
+        })),
+    );
     return saved.map((workspace) => this._enrichWorkspace(workspace));
   }
 
@@ -583,10 +771,19 @@ export class AgentBridge {
         session.agentName,
         session.workspaceId,
       ) ?? { valid: true, reasons: [] };
+      const hasProviderSessionRef = Boolean(String(session.providerSessionRef || "").trim());
+      const stale = !workspace || !membership || !validation.valid;
+      const bindingStatus =
+        !hasProviderSessionRef
+          ? "missing_ref"
+          : stale
+            ? "stale"
+            : "valid";
       return {
         ...session,
         workspaceName: workspace?.name ?? null,
-        stale: !workspace || !membership || !validation.valid,
+        stale,
+        bindingStatus,
         reasons: [
           ...(workspace ? [] : ["workspace が存在しません。"]),
           ...(membership ? [] : ["workspace agent binding が存在しません。"]),
@@ -751,6 +948,397 @@ export class AgentBridge {
     return this.store.listOperationAudits(workspaceId, limit);
   }
 
+  _normalizeTaskContextSnapshot(workspaceId, snapshot) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const memberNames = new Set(this.store.listWorkspaceAgents(workspaceId).map((entry) => entry.agentName));
+    const rawClaims = Array.isArray(snapshot?.claims) ? snapshot.claims : [];
+    const rawQueue = Array.isArray(snapshot?.handoffQueue) ? snapshot.handoffQueue : [];
+    const claimsByAgent = new Map();
+    for (const entry of rawClaims) {
+      const agentName = String(entry?.agentName ?? "").trim();
+      const task = normalizeTaskText(entry?.task);
+      if (!agentName || !task || !memberNames.has(agentName)) continue;
+      const normalizedEntry = {
+        id: String(entry?.id || randomUUID()),
+        agentName,
+        task,
+        createdAt: String(entry?.createdAt || entry?.updatedAt || new Date().toISOString()),
+        updatedAt: String(entry?.updatedAt || entry?.createdAt || new Date().toISOString()),
+        requestedBy: String(entry?.requestedBy || "system"),
+        source: String(entry?.source || "system"),
+      };
+      const previous = claimsByAgent.get(agentName);
+      if (!previous || String(previous.updatedAt || "") < normalizedEntry.updatedAt) {
+        claimsByAgent.set(agentName, normalizedEntry);
+      }
+    }
+    const claims = [...claimsByAgent.values()].sort((left, right) => compareIsoTimestampsDesc(left.updatedAt, right.updatedAt));
+    const handoffQueue = rawQueue
+      .map((entry) => ({
+        id: String(entry?.id || randomUUID()),
+        fromAgentName: String(entry?.fromAgentName ?? "").trim(),
+        toAgentName: String(entry?.toAgentName ?? "").trim(),
+        task: normalizeTaskText(entry?.task),
+        createdAt: String(entry?.createdAt || entry?.updatedAt || new Date().toISOString()),
+        updatedAt: String(entry?.updatedAt || entry?.createdAt || new Date().toISOString()),
+        requestedBy: String(entry?.requestedBy || "system"),
+        source: String(entry?.source || "system"),
+        status: "pending",
+      }))
+      .filter((entry) =>
+        entry.fromAgentName &&
+        entry.toAgentName &&
+        entry.task &&
+        memberNames.has(entry.fromAgentName) &&
+        memberNames.has(entry.toAgentName),
+      )
+      .sort((left, right) => compareIsoTimestampsDesc(left.updatedAt, right.updatedAt));
+    let ownerAgentName = String(snapshot?.ownerAgentName ?? "").trim() || null;
+    if (!ownerAgentName || !claims.some((entry) => entry.agentName === ownerAgentName)) {
+      ownerAgentName = claims[0]?.agentName ?? null;
+    }
+    const ownerClaim = claims.find((entry) => entry.agentName === ownerAgentName) ?? null;
+    const fallbackTask = normalizeTaskText(snapshot?.currentTask);
+    const currentTask = ownerClaim?.task ?? (fallbackTask || null);
+    const updatedAt =
+      String(snapshot?.updatedAt || ownerClaim?.updatedAt || handoffQueue[0]?.updatedAt || "") || null;
+    return {
+      workspaceId,
+      ownerAgentName,
+      currentTask,
+      claims,
+      handoffQueue,
+      updatedAt,
+    };
+  }
+
+  _loadTaskContext(workspaceId) {
+    const raw = this.store.getJsonAppSetting(coordinationSettingKey(workspaceId), createEmptyTaskContext(workspaceId));
+    return this._normalizeTaskContextSnapshot(workspaceId, raw);
+  }
+
+  _saveTaskContext(workspaceId, snapshot) {
+    const normalized = this._normalizeTaskContextSnapshot(workspaceId, snapshot);
+    this.store.setJsonAppSetting(coordinationSettingKey(workspaceId), normalized);
+    return normalized;
+  }
+
+  _emitCoordinationUpdate(action, workspaceId, context, details = {}) {
+    const payload = {
+      type: "coordination.updated",
+      workspaceId,
+      action,
+      context,
+      details,
+      createdAt: new Date().toISOString(),
+    };
+    this._emit(payload);
+    return payload;
+  }
+
+  _emitCoordinationNotice(workspaceId, message, details = {}) {
+    if (!message) return;
+    this._emit({
+      type: "coordination.notice",
+      workspaceId,
+      message,
+      details,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  _findPendingHandoffForClaim(context, agentName, task) {
+    const normalizedTask = normalizeTaskText(task);
+    const candidates = context.handoffQueue.filter((entry) => entry.toAgentName === agentName);
+    if (candidates.length === 0) return null;
+    return candidates.find((entry) => entry.task === normalizedTask) ?? (candidates.length === 1 ? candidates[0] : null);
+  }
+
+  getTaskContext(workspaceId) {
+    const normalized = this._loadTaskContext(workspaceId);
+    const stored = this.store.getJsonAppSetting(coordinationSettingKey(workspaceId), null);
+    const serializedNormalized = JSON.stringify(normalized);
+    if (JSON.stringify(stored) !== serializedNormalized) {
+      this.store.setJsonAppSetting(coordinationSettingKey(workspaceId), normalized);
+    }
+    return normalized;
+  }
+
+  listWorkspaceHandoffs(workspaceId) {
+    return this.getTaskContext(workspaceId).handoffQueue;
+  }
+
+  claimTask(workspaceId, agentName, task, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const normalizedAgentName = String(agentName ?? "").trim();
+    const normalizedTask = normalizeTaskText(task);
+    if (!normalizedAgentName || !normalizedTask) {
+      throw new Error("agentName と task は必須です。");
+    }
+    const membership = this.store.listWorkspaceAgents(workspaceId).find((entry) => entry.agentName === normalizedAgentName);
+    if (!membership) {
+      throw new Error(`${normalizedAgentName} は workspace "${workspace.name}" に属していません。`);
+    }
+    const timestamp = new Date().toISOString();
+    const current = this.getTaskContext(workspaceId);
+    const matchedHandoff = this._findPendingHandoffForClaim(current, normalizedAgentName, normalizedTask);
+    const claims = current.claims.filter((entry) => entry.agentName !== normalizedAgentName);
+    if (matchedHandoff) {
+      for (let index = claims.length - 1; index >= 0; index -= 1) {
+        if (claims[index].agentName === matchedHandoff.fromAgentName) {
+          claims.splice(index, 1);
+        }
+      }
+    }
+    claims.unshift({
+      id: matchedHandoff?.id ?? randomUUID(),
+      agentName: normalizedAgentName,
+      task: normalizedTask,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+    });
+    const next = this._saveTaskContext(workspaceId, {
+      ...current,
+      ownerAgentName: normalizedAgentName,
+      currentTask: normalizedTask,
+      claims,
+      handoffQueue: matchedHandoff
+        ? current.handoffQueue.filter((entry) => entry.id !== matchedHandoff.id)
+        : current.handoffQueue,
+      updatedAt: timestamp,
+    });
+    this.store.addOperationAudit({
+      workspaceId,
+      agentName: normalizedAgentName,
+      operationType: "coordination.claim",
+      targetRef: `${workspaceId}:${normalizedAgentName}`,
+      status: "completed",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+      details: {
+        task: normalizedTask,
+        acceptedHandoffId: matchedHandoff?.id ?? null,
+        previousOwner: current.ownerAgentName ?? null,
+      },
+    });
+    this._emitCoordinationUpdate("claim", workspaceId, next, {
+      agentName: normalizedAgentName,
+      task: normalizedTask,
+      acceptedHandoffId: matchedHandoff?.id ?? null,
+    });
+    this._emitCoordinationNotice(
+      workspaceId,
+      matchedHandoff
+        ? `🤝 ${matchedHandoff.fromAgentName} → ${normalizedAgentName} handoff accepted: ${normalizedTask}`
+        : `🧷 ${normalizedAgentName} claimed: ${normalizedTask}`,
+      {
+        agentName: normalizedAgentName,
+        task: normalizedTask,
+        source: options.source ?? "ui",
+      },
+    );
+    return next;
+  }
+
+  releaseTask(workspaceId, agentName, options = {}) {
+    const normalizedAgentName = String(agentName ?? "").trim();
+    if (!normalizedAgentName) {
+      throw new Error("agentName は必須です。");
+    }
+    const current = this.getTaskContext(workspaceId);
+    const hadClaim = current.claims.some((entry) => entry.agentName === normalizedAgentName);
+    const hadHandoffs = current.handoffQueue.some((entry) =>
+      entry.fromAgentName === normalizedAgentName || entry.toAgentName === normalizedAgentName,
+    );
+    if (!hadClaim && !hadHandoffs) {
+      return current;
+    }
+    const timestamp = new Date().toISOString();
+    const claims = current.claims.filter((entry) => entry.agentName !== normalizedAgentName);
+    const handoffQueue = current.handoffQueue.filter((entry) =>
+      entry.fromAgentName !== normalizedAgentName && entry.toAgentName !== normalizedAgentName,
+    );
+    const nextOwner = claims[0]?.agentName ?? null;
+    const next = this._saveTaskContext(workspaceId, {
+      ...current,
+      ownerAgentName: nextOwner,
+      currentTask: claims[0]?.task ?? null,
+      claims,
+      handoffQueue,
+      updatedAt: timestamp,
+    });
+    this.lockManager?.clearAgentLocks?.(workspaceId, normalizedAgentName, {
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "system",
+      reason: options.reason ?? "manual",
+      silent: true,
+    });
+    this.store.addOperationAudit({
+      workspaceId,
+      agentName: normalizedAgentName,
+      operationType: "coordination.release",
+      targetRef: `${workspaceId}:${normalizedAgentName}`,
+      status: "completed",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "system",
+      details: {
+        reason: options.reason ?? "manual",
+        removedClaim: hadClaim,
+        removedHandoffs: hadHandoffs,
+      },
+    });
+    this._emitCoordinationUpdate("release", workspaceId, next, {
+      agentName: normalizedAgentName,
+      reason: options.reason ?? "manual",
+    });
+    if (!options.silent) {
+      this._emitCoordinationNotice(
+        workspaceId,
+        `🪪 ${normalizedAgentName} released${options.reason ? ` (${options.reason})` : ""}`,
+        {
+          agentName: normalizedAgentName,
+          reason: options.reason ?? "manual",
+          source: options.source ?? "system",
+        },
+      );
+    }
+    return next;
+  }
+
+  clearTaskContext(workspaceId, options = {}) {
+    const current = this.getTaskContext(workspaceId);
+    if (current.claims.length === 0 && current.handoffQueue.length === 0) {
+      return current;
+    }
+    const next = this._saveTaskContext(workspaceId, createEmptyTaskContext(workspaceId));
+    this.lockManager?.clearWorkspaceLocks?.(workspaceId, {
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "system",
+      reason: options.reason ?? "clear",
+      silent: true,
+    });
+    this.store.addOperationAudit({
+      workspaceId,
+      agentName: null,
+      operationType: "coordination.clear",
+      targetRef: workspaceId,
+      status: "completed",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "system",
+      details: {
+        reason: options.reason ?? "clear",
+      },
+    });
+    this._emitCoordinationUpdate("clear", workspaceId, next, {
+      reason: options.reason ?? "clear",
+    });
+    if (!options.silent) {
+      this._emitCoordinationNotice(
+        workspaceId,
+        `🧹 task coordination cleared${options.reason ? ` (${options.reason})` : ""}`,
+        {
+          reason: options.reason ?? "clear",
+          source: options.source ?? "system",
+        },
+      );
+    }
+    return next;
+  }
+
+  handoffTask(workspaceId, fromAgentName, toAgentName, task, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const fromName = String(fromAgentName ?? "").trim();
+    const toName = String(toAgentName ?? "").trim();
+    const normalizedTask = normalizeTaskText(task);
+    if (!fromName || !toName || !normalizedTask) {
+      throw new Error("fromAgentName / toAgentName / task は必須です。");
+    }
+    if (fromName === toName) {
+      throw new Error("handoff 元と先は別 agent にしてください。");
+    }
+    const members = new Set(this.store.listWorkspaceAgents(workspaceId).map((entry) => entry.agentName));
+    if (!members.has(fromName) || !members.has(toName)) {
+      throw new Error("workspace に属する agent を指定してください。");
+    }
+    const timestamp = new Date().toISOString();
+    const current = this.getTaskContext(workspaceId);
+    const claims = current.claims.filter((entry) => entry.agentName !== fromName);
+    claims.unshift({
+      id: randomUUID(),
+      agentName: fromName,
+      task: normalizedTask,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+    });
+    const queueEntry = {
+      id: randomUUID(),
+      fromAgentName: fromName,
+      toAgentName: toName,
+      task: normalizedTask,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+      status: "pending",
+    };
+    const next = this._saveTaskContext(workspaceId, {
+      ...current,
+      ownerAgentName: fromName,
+      currentTask: normalizedTask,
+      claims,
+      handoffQueue: [
+        queueEntry,
+        ...current.handoffQueue.filter((entry) =>
+          !(entry.fromAgentName === fromName && entry.toAgentName === toName && entry.task === normalizedTask),
+        ),
+      ],
+      updatedAt: timestamp,
+    });
+    this.store.addOperationAudit({
+      workspaceId,
+      agentName: fromName,
+      operationType: "coordination.handoff",
+      targetRef: `${workspaceId}:${fromName}->${toName}`,
+      status: "completed",
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+      details: {
+        fromAgentName: fromName,
+        toAgentName: toName,
+        task: normalizedTask,
+      },
+    });
+    this._emitCoordinationUpdate("handoff", workspaceId, next, {
+      fromAgentName: fromName,
+      toAgentName: toName,
+      task: normalizedTask,
+    });
+    this._emitCoordinationNotice(
+      workspaceId,
+      `📮 handoff queued: ${fromName} → ${toName} :: ${normalizedTask}`,
+      {
+        fromAgentName: fromName,
+        toAgentName: toName,
+        task: normalizedTask,
+        source: options.source ?? "ui",
+      },
+    );
+    return next;
+  }
+
   createWorkspaceCheckpoint(workspaceId, options = {}) {
     const workspace = this.getWorkspace(workspaceId);
     if (!workspace) {
@@ -910,6 +1498,29 @@ export class AgentBridge {
     return result;
   }
 
+  previewWorkspaceDreaming(workspaceId) {
+    return this.memoryAutomationService?.previewWorkspaceDreaming?.(workspaceId) ?? null;
+  }
+
+  applyWorkspaceDreaming(workspaceId, options = {}) {
+    const result = this.memoryAutomationService?.applyWorkspaceDreaming?.(workspaceId, options) ?? null;
+    if (result) {
+      this.store.addOperationAudit({
+        workspaceId,
+        operationType: "memory.dreaming",
+        targetRef: workspaceId,
+        status: "completed",
+        requestedBy: options.requestedBy ?? "system",
+        source: options.source ?? "ui",
+        details: {
+          backupPath: result.backupPath,
+          tokenEstimate: result.tokenEstimate,
+        },
+      });
+    }
+    return result;
+  }
+
   getSkillRegistry() {
     return this.skillManager?.getRegistrySummary?.() ?? null;
   }
@@ -934,6 +1545,83 @@ export class AgentBridge {
       });
     }
     return result;
+  }
+
+  getMcpRegistry() {
+    return this.mcpManager?.getRegistrySummary?.() ?? null;
+  }
+
+  planWorkspaceMcpSync(workspaceId, options = {}) {
+    return this.mcpManager?.planWorkspaceSync?.(workspaceId, options) ?? null;
+  }
+
+  applyWorkspaceMcpSync(workspaceId, options = {}) {
+    const result = this.mcpManager?.applyWorkspaceSync?.(workspaceId, options) ?? null;
+    if (result) {
+      this.store.addOperationAudit({
+        workspaceId,
+        operationType: "mcp.sync",
+        targetRef: workspaceId,
+        status: "completed",
+        requestedBy: options.requestedBy ?? "system",
+        source: options.source ?? "ui",
+        details: {
+          appliedCount: Array.isArray(result.applied) ? result.applied.length : 0,
+        },
+      });
+    }
+    return result;
+  }
+
+  getWorkspaceReview(workspaceId) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.gitService?.getWorkspaceReview?.({
+      workspaceId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+    }) ?? null;
+  }
+
+  getWorkspaceWorktreeStatus(workspaceId) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    return this.gitService?.getWorkspaceWorktreeStatus?.({
+      workspaceId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+    }) ?? null;
+  }
+
+  ensureWorkspaceWorktree(workspaceId, options = {}) {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const result = this.gitService?.ensureWorkspaceWorktree?.({
+      workspaceId,
+      workdir: workspace.workdir || this.config.codexWorkdir,
+      requestedBy: options.requestedBy ?? "system",
+      source: options.source ?? "ui",
+    }) ?? { workspace, status: null };
+    return {
+      workspace: this._enrichWorkspace(result.workspace ?? workspace),
+      status: result.status ?? this.getWorkspaceWorktreeStatus(workspaceId),
+    };
+  }
+
+  listWorkspaceSemanticLocks(workspaceId) {
+    return this.lockManager?.listWorkspaceLocks?.(workspaceId) ?? [];
+  }
+
+  claimWorkspaceSemanticLock(workspaceId, options = {}) {
+    return this.lockManager?.claimWorkspaceLock?.(workspaceId, options) ?? null;
+  }
+
+  releaseWorkspaceSemanticLock(workspaceId, options = {}) {
+    return this.lockManager?.releaseWorkspaceLock?.(workspaceId, options) ?? null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1179,6 +1867,13 @@ export class AgentBridge {
       workspaceId,
       source: normalizedSource,
     });
+    if (runStatus === "timeout") {
+      this.releaseTask(workspaceId, agentName, {
+        requestedBy: "system",
+        source: normalizedSource,
+        reason: "timeout",
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------

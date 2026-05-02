@@ -14,6 +14,9 @@ const state = {
   workspaceId: null,
   workspaces: [],
   workspaceAgents: new Map(),
+  workspaceTerminalStates: new Map(),
+  workspaceTerminalStateLoaded: new Set(),
+  workspaceTerminalStatePending: new Set(),
   discordChannels: [],
   activeTab: "chat",
   bootReady: false,
@@ -40,9 +43,19 @@ const state = {
   // workspaceId:agentName → fallback history sync timer
   messageCatchups: new Map(),
   sidebarDrag: null,
+  sidebarPendingRender: false,
   activeBootstrapSignature: "",
   activeBootstrapPromise: null,
   pendingActiveBootstrapSignature: "",
+  settingsRollbackPreview: null,
+  settingsWorkspaceProfile: null,
+  settingsReviewSnapshot: null,
+  settingsWorktreeStatus: null,
+  settingsLockConflict: null,
+  settingsExtensionsOverview: null,
+  settingsMemoryAutomationPreview: null,
+  settingsSkillPlan: null,
+  settingsMcpPlan: null,
 };
 
 const MAX_ACTIVE_WORKSPACES = 5;
@@ -138,6 +151,52 @@ const sessionDiscordChannelEl = $("session-discord-channel");
 const sessionContextModeEl = $("session-context-mode");
 const sessionContextHintEl = $("session-context-hint");
 const sessionMemoryInputEl = $("session-memory-input");
+const btnSessionDurabilityRefreshEl = $("btn-session-durability-refresh");
+const sessionDurabilityHintEl = $("session-durability-hint");
+const sessionResumeBindingsEl = $("session-resume-bindings");
+const sessionOperationAuditsEl = $("session-operation-audits");
+const sessionCheckpointLabelEl = $("session-checkpoint-label");
+const btnSessionCheckpointCreateEl = $("btn-session-checkpoint-create");
+const sessionCheckpointsEl = $("session-checkpoints");
+const sessionRollbackPreviewEl = $("session-rollback-preview");
+const sessionCoordinationHintEl = $("session-coordination-hint");
+const sessionCoordinationSummaryEl = $("session-coordination-summary");
+const sessionClaimAgentEl = $("session-claim-agent");
+const sessionClaimTaskEl = $("session-claim-task");
+const btnSessionClaimEl = $("btn-session-claim");
+const sessionHandoffFromEl = $("session-handoff-from");
+const sessionHandoffToEl = $("session-handoff-to");
+const sessionHandoffTaskEl = $("session-handoff-task");
+const btnSessionHandoffEl = $("btn-session-handoff");
+const sessionClaimsPanelEl = $("session-claims-panel");
+const sessionHandoffsPanelEl = $("session-handoffs-panel");
+const sessionProfileHintEl = $("session-profile-hint");
+const sessionProfileModeEl = $("session-profile-mode");
+const sessionProfilePersonaEl = $("session-profile-persona");
+const sessionProfileAutonomyEl = $("session-profile-autonomy");
+const sessionProfileNotesEl = $("session-profile-notes");
+const btnSessionProfileSaveEl = $("btn-session-profile-save");
+const btnSessionReviewRefreshEl = $("btn-session-review-refresh");
+const sessionReviewHintEl = $("session-review-hint");
+const sessionReviewSummaryEl = $("session-review-summary");
+const sessionReviewChangesEl = $("session-review-changes");
+const sessionWorktreePanelEl = $("session-worktree-panel");
+const sessionLockAgentEl = $("session-lock-agent");
+const sessionLockFileEl = $("session-lock-file");
+const sessionLockSymbolEl = $("session-lock-symbol");
+const btnSessionLockClaimEl = $("btn-session-lock-claim");
+const sessionLockConflictEl = $("session-lock-conflict");
+const sessionLocksPanelEl = $("session-locks-panel");
+const btnSessionAutomationRefreshEl = $("btn-session-automation-refresh");
+const sessionAutomationHintEl = $("session-automation-hint");
+const sessionExtensionDashboardPanelEl = $("session-extension-dashboard-panel");
+const sessionTaskBoardPanelEl = $("session-task-board-panel");
+const sessionValidationPanelEl = $("session-validation-panel");
+const sessionDriftPanelEl = $("session-drift-panel");
+const sessionMemoryAutomationPanelEl = $("session-memory-automation-panel");
+const sessionMemoryAutomationPreviewEl = $("session-memory-automation-preview");
+const sessionSkillsPanelEl = $("session-skills-panel");
+const sessionMcpPanelEl = $("session-mcp-panel");
 const btnSaveSessionMemoryEl = $("btn-save-session-memory");
 const btnSessionSaveEl = $("btn-session-save");
 const btnSessionDeleteEl = $("btn-session-delete");
@@ -426,6 +485,912 @@ function setInlineHint(el, text = "") {
   const normalizedText = String(text ?? "").trim();
   el.textContent = normalizedText;
   el.hidden = !normalizedText;
+}
+
+function shortenRef(value = "", maxLength = 18) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function summarizeAuditDetails(details = {}) {
+  const normalized = details && typeof details === "object" ? details : {};
+  const parts = [];
+  if (Array.isArray(normalized.blockedReasons) && normalized.blockedReasons.length > 0) {
+    parts.push(`blocked: ${normalized.blockedReasons.join(" / ")}`);
+  }
+  if (normalized.state?.status) {
+    parts.push(`state=${normalized.state.status}`);
+  }
+  if (Number.isFinite(Number(normalized.dirtyCount))) {
+    parts.push(`dirty=${Number(normalized.dirtyCount)}`);
+  }
+  if (normalized.currentHeadSha) {
+    parts.push(`head=${shortenRef(normalized.currentHeadSha, 12)}`);
+  }
+  if (normalized.checkpointId) {
+    parts.push(`checkpoint=${shortenRef(normalized.checkpointId, 12)}`);
+  }
+  if (normalized.backupPath) {
+    parts.push(`backup=${shortenRef(normalized.backupPath, 32)}`);
+  }
+  if (normalized.diaryPath) {
+    parts.push(`diary=${shortenRef(normalized.diaryPath, 32)}`);
+  }
+  if (Number.isFinite(Number(normalized.appliedCount))) {
+    parts.push(`applied=${Number(normalized.appliedCount)}`);
+  }
+  if (Number.isFinite(Number(normalized.tokenEstimate))) {
+    parts.push(`tokens≈${Number(normalized.tokenEstimate)}`);
+  }
+  if (typeof normalized.force === "boolean") {
+    parts.push(normalized.force ? "force" : "normal");
+  }
+  if (parts.length > 0) {
+    return parts.join(" · ");
+  }
+  const raw = JSON.stringify(normalized);
+  return raw && raw !== "{}" ? shortenRef(raw, 120) : "";
+}
+
+function renderSessionResumeBindings(bindings = []) {
+  if (!sessionResumeBindingsEl) return;
+  if (!Array.isArray(bindings) || bindings.length === 0) {
+    sessionResumeBindingsEl.innerHTML = `
+      <div class="settings-inspector-title">Resume bindings</div>
+      <p class="settings-inspector-empty">保存済み resume binding はまだありません。</p>
+    `;
+    return;
+  }
+
+  const rows = bindings.map((entry) => {
+    const metaParts = [
+      `state=${entry.lastRunState || "-"}`,
+      `updated=${entry.updatedAt ? formatSettingsDateTime(entry.updatedAt) : "-"}`,
+    ];
+    if (entry.model) metaParts.push(`model=${entry.model}`);
+    if (entry.workdir) metaParts.push(`workdir=${entry.workdir}`);
+    const reasons = Array.isArray(entry.reasons) ? entry.reasons.filter(Boolean) : [];
+    return `
+      <tr>
+        <td>
+          <strong>${escHtml(entry.agentName || "-")}</strong>
+          <div class="settings-binding-meta">${escHtml(metaParts.join(" · "))}</div>
+          ${reasons.length > 0 ? `<div class="settings-binding-reasons">${escHtml(reasons.join(" / "))}</div>` : ""}
+        </td>
+        <td>
+          <div><code title="${escHtml(entry.providerSessionRef || "")}">${escHtml(shortenRef(entry.providerSessionRef || "none", 28))}</code></div>
+          <div class="settings-binding-meta">binding=${escHtml(entry.bindingStatus || "unknown")}</div>
+          <div class="settings-row-actions">
+            <button
+              type="button"
+              class="btn-outline"
+              data-session-resume-agent="${escHtml(entry.agentName || "")}"
+              ${entry.bindingStatus !== "valid" ? "disabled" : ""}
+            >resume</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  sessionResumeBindingsEl.innerHTML = `
+    <div class="settings-inspector-title">Resume bindings</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionOperationAudits(audits = []) {
+  if (!sessionOperationAuditsEl) return;
+  if (!Array.isArray(audits) || audits.length === 0) {
+    sessionOperationAuditsEl.innerHTML = `
+      <div class="settings-inspector-title">Recent operation audit</div>
+      <p class="settings-inspector-empty">operation audit はまだありません。</p>
+    `;
+    return;
+  }
+
+  const rows = audits.map((entry) => {
+    const meta = [
+      entry.createdAt ? formatSettingsDateTime(entry.createdAt) : "-",
+      entry.agentName || "workspace",
+      entry.status || "-",
+      entry.source || "-",
+    ].join(" · ");
+    const detailSummary = summarizeAuditDetails(entry.details);
+    const targetRef = entry.targetRef ? `<div class="settings-audit-meta">target=${escHtml(entry.targetRef)}</div>` : "";
+    return `
+      <tr>
+        <td>
+          <strong>${escHtml(entry.operationType || "-")}</strong>
+          <div class="settings-audit-meta">${escHtml(meta)}</div>
+        </td>
+        <td>
+          ${detailSummary ? `<div>${escHtml(detailSummary)}</div>` : `<div class="settings-inspector-empty">details なし</div>`}
+          ${targetRef}
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  sessionOperationAuditsEl.innerHTML = `
+    <div class="settings-inspector-title">Recent operation audit</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+async function loadSessionDurability(workspaceId) {
+  if (!workspaceId) return;
+  try {
+    const [bindingsRes, auditsRes] = await Promise.all([
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/bindings`),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/audits?limit=8`),
+    ]);
+    const bindings = bindingsRes.ok ? await bindingsRes.json() : [];
+    const audits = auditsRes.ok ? await auditsRes.json() : [];
+    renderSessionResumeBindings(bindings);
+    renderSessionOperationAudits(audits);
+    setInlineHint(
+      sessionDurabilityHintEl,
+      `resume binding ${Array.isArray(bindings) ? bindings.length : 0} 件 / audit ${Array.isArray(audits) ? audits.length : 0} 件`,
+    );
+  } catch {
+    renderSessionResumeBindings([]);
+    renderSessionOperationAudits([]);
+    setInlineHint(sessionDurabilityHintEl, "durability 情報の取得に失敗しました。");
+  }
+}
+
+function populateWorkspaceMemberSelect(selectEl, workspaceId, { includeBlank = false, preferredValue = "" } = {}) {
+  if (!selectEl) return;
+  const members = getWorkspaceAgents(workspaceId);
+  const currentValue = preferredValue || selectEl.value;
+  selectEl.innerHTML = "";
+  if (includeBlank) {
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "未設定";
+    selectEl.appendChild(blank);
+  }
+  for (const member of members) {
+    const option = document.createElement("option");
+    option.value = member.agentName;
+    option.textContent = member.isParent ? `${member.agentName} (parent)` : member.agentName;
+    selectEl.appendChild(option);
+  }
+  if ([...selectEl.options].some((option) => option.value === currentValue)) {
+    selectEl.value = currentValue;
+  } else if (selectEl.options.length > 0) {
+    selectEl.selectedIndex = 0;
+  }
+}
+
+function renderSessionCheckpoints(checkpoints = []) {
+  if (!sessionCheckpointsEl) return;
+  if (!Array.isArray(checkpoints) || checkpoints.length === 0) {
+    sessionCheckpointsEl.innerHTML = `
+      <div class="settings-inspector-title">Checkpoints</div>
+      <p class="settings-inspector-empty">checkpoint はまだありません。</p>
+    `;
+    return;
+  }
+  const rows = checkpoints.map((entry) => `
+    <tr>
+      <td>
+        <strong>${escHtml(entry.label || entry.id)}</strong>
+        <div class="settings-audit-meta">${escHtml(([
+          entry.id,
+          entry.kind || "manual",
+          entry.createdAt ? formatSettingsDateTime(entry.createdAt) : "-",
+        ]).join(" · "))}</div>
+      </td>
+      <td>
+        <div>${escHtml(shortenRef(entry.gitHeadSha || "-", 20))}</div>
+        <div class="settings-row-actions">
+          <button type="button" class="btn-outline" data-checkpoint-preview="${escHtml(entry.id)}">preview</button>
+        </div>
+      </td>
+    </tr>
+  `).join("");
+  sessionCheckpointsEl.innerHTML = `
+    <div class="settings-inspector-title">Checkpoints</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionRollbackPreview(preview = null) {
+  if (!sessionRollbackPreviewEl) return;
+  state.settingsRollbackPreview = preview || null;
+  if (!preview?.checkpoint) {
+    sessionRollbackPreviewEl.innerHTML = `
+      <div class="settings-inspector-title">Rollback preview</div>
+      <p class="settings-inspector-empty">preview を選ぶと rollback 条件をここに表示します。</p>
+    `;
+    return;
+  }
+  const blockedReasons = Array.isArray(preview.blockedReasons) ? preview.blockedReasons.filter(Boolean) : [];
+  sessionRollbackPreviewEl.innerHTML = `
+    <div class="settings-inspector-title">Rollback preview</div>
+    <table class="settings-table">
+      <tbody>
+        <tr><td>checkpoint</td><td><code>${escHtml(preview.checkpoint.id || "-")}</code></td></tr>
+        <tr><td>label</td><td>${escHtml(preview.checkpoint.label || "-")}</td></tr>
+        <tr><td>workdir</td><td>${escHtml(preview.current?.rootDir || preview.checkpoint.workdir || "-")}</td></tr>
+        <tr><td>head</td><td><code>${escHtml(preview.checkpoint.gitHeadSha || "-")}</code></td></tr>
+        <tr><td>dirtyCount</td><td>${escHtml(String(preview.current?.status?.dirtyCount ?? "-"))}</td></tr>
+      </tbody>
+    </table>
+    ${blockedReasons.length > 0 ? `<div class="settings-warning-box">${escHtml(blockedReasons.join(" / "))}</div>` : ""}
+    <div class="settings-inspector-actions">
+      <button
+        id="btn-session-rollback-apply"
+        type="button"
+        class="btn-settings-save"
+        ${blockedReasons.length > 0 ? "disabled" : ""}
+      >rollback apply</button>
+    </div>
+  `;
+}
+
+async function loadSessionGitSafety(workspaceId) {
+  if (!workspaceId) return;
+  try {
+    const checkpointsRes = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/checkpoints?limit=12`);
+    const checkpoints = checkpointsRes.ok ? await checkpointsRes.json() : [];
+    renderSessionCheckpoints(checkpoints);
+    if (state.settingsRollbackPreview?.checkpoint?.workspaceId === workspaceId) {
+      renderSessionRollbackPreview(state.settingsRollbackPreview);
+    } else {
+      renderSessionRollbackPreview(null);
+    }
+  } catch {
+    renderSessionCheckpoints([]);
+    renderSessionRollbackPreview(null);
+  }
+}
+
+function renderSessionCoordinationSummary(context = null) {
+  if (!sessionCoordinationSummaryEl) return;
+  const claims = Array.isArray(context?.claims) ? context.claims : [];
+  const handoffs = Array.isArray(context?.handoffQueue) ? context.handoffQueue : [];
+  sessionCoordinationSummaryEl.innerHTML = `
+    <div class="settings-inspector-title">Current owner / task</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">owner: ${escHtml(context?.ownerAgentName || "none")}</span>
+      <span class="settings-pill">task: ${escHtml(context?.currentTask || "none")}</span>
+      <span class="settings-pill">claims: ${escHtml(String(claims.length))}</span>
+      <span class="settings-pill">handoffs: ${escHtml(String(handoffs.length))}</span>
+    </div>
+  `;
+}
+
+function renderSessionClaimsPanel(context = null) {
+  if (!sessionClaimsPanelEl) return;
+  const claims = Array.isArray(context?.claims) ? context.claims : [];
+  if (claims.length === 0) {
+    sessionClaimsPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Active claims</div>
+      <p class="settings-inspector-empty">active claim はありません。</p>
+    `;
+    return;
+  }
+  const rows = claims.map((entry) => `
+    <tr>
+      <td>
+        <strong>${escHtml(entry.agentName)}</strong>
+        <div class="settings-audit-meta">${escHtml(entry.updatedAt ? formatSettingsDateTime(entry.updatedAt) : "-")}</div>
+      </td>
+      <td>
+        <div>${escHtml(entry.task)}</div>
+        <div class="settings-row-actions">
+          <button type="button" class="btn-outline" data-claim-release-agent="${escHtml(entry.agentName)}">release</button>
+        </div>
+      </td>
+    </tr>
+  `).join("");
+  sessionClaimsPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Active claims</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionHandoffsPanel(context = null) {
+  if (!sessionHandoffsPanelEl) return;
+  const handoffs = Array.isArray(context?.handoffQueue) ? context.handoffQueue : [];
+  if (handoffs.length === 0) {
+    sessionHandoffsPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Handoff queue</div>
+      <p class="settings-inspector-empty">handoff queue は空です。</p>
+    `;
+    return;
+  }
+  const rows = handoffs.map((entry) => `
+    <tr>
+      <td>
+        <strong>${escHtml(`${entry.fromAgentName} → ${entry.toAgentName}`)}</strong>
+        <div class="settings-audit-meta">${escHtml(entry.updatedAt ? formatSettingsDateTime(entry.updatedAt) : "-")}</div>
+      </td>
+      <td>${escHtml(entry.task)}</td>
+    </tr>
+  `).join("");
+  sessionHandoffsPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Handoff queue</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+async function loadSessionCoordination(workspaceId) {
+  if (!workspaceId) return;
+  populateWorkspaceMemberSelect(sessionClaimAgentEl, workspaceId);
+  populateWorkspaceMemberSelect(sessionHandoffFromEl, workspaceId);
+  populateWorkspaceMemberSelect(sessionHandoffToEl, workspaceId);
+  try {
+    const contextRes = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/tasks`);
+    const context = contextRes.ok ? await contextRes.json() : null;
+    renderSessionCoordinationSummary(context);
+    renderSessionClaimsPanel(context);
+    renderSessionHandoffsPanel(context);
+    setInlineHint(
+      sessionCoordinationHintEl,
+      `owner=${context?.ownerAgentName || "none"} / claims=${Array.isArray(context?.claims) ? context.claims.length : 0} / handoffs=${Array.isArray(context?.handoffQueue) ? context.handoffQueue.length : 0}`,
+    );
+  } catch {
+    renderSessionCoordinationSummary(null);
+    renderSessionClaimsPanel(null);
+    renderSessionHandoffsPanel(null);
+    setInlineHint(sessionCoordinationHintEl, "coordination 情報の取得に失敗しました。");
+  }
+}
+
+function applySessionProfile(profile = null) {
+  const normalized = {
+    mode: profile?.mode || "standard",
+    persona: profile?.persona || "balanced",
+    autonomy: profile?.autonomy || "guided",
+    notes: profile?.notes || "",
+  };
+  state.settingsWorkspaceProfile = normalized;
+  if (sessionProfileModeEl) sessionProfileModeEl.value = normalized.mode;
+  if (sessionProfilePersonaEl) sessionProfilePersonaEl.value = normalized.persona;
+  if (sessionProfileAutonomyEl) sessionProfileAutonomyEl.value = normalized.autonomy;
+  if (sessionProfileNotesEl) sessionProfileNotesEl.value = normalized.notes;
+  setInlineHint(
+    sessionProfileHintEl,
+    `mode=${normalized.mode} / persona=${normalized.persona} / autonomy=${normalized.autonomy}`,
+  );
+}
+
+async function loadSessionProfile(workspaceId) {
+  if (!workspaceId) return;
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/profile`);
+    const profile = res.ok ? await res.json() : null;
+    applySessionProfile(profile);
+  } catch {
+    applySessionProfile(null);
+    setInlineHint(sessionProfileHintEl, "workspace profile の取得に失敗しました。");
+  }
+}
+
+function joinWindowsPath(basePath, childPath = "") {
+  const base = String(basePath ?? "").replace(/[\\/]+$/g, "");
+  const child = String(childPath ?? "").replace(/^[\\/]+/g, "").replace(/\//g, "\\");
+  if (!child) return base;
+  return /^[A-Za-z]:\\/u.test(child) ? child : `${base}\\${child}`;
+}
+
+function renderSessionReviewSummary(review = null) {
+  if (!sessionReviewSummaryEl) return;
+  state.settingsReviewSnapshot = review || null;
+  const repo = review?.repository;
+  if (!repo?.isGitRepository) {
+    sessionReviewSummaryEl.innerHTML = `
+      <div class="settings-inspector-title">Review summary</div>
+      <p class="settings-inspector-empty">Git repository ではありません。</p>
+    `;
+    return;
+  }
+  sessionReviewSummaryEl.innerHTML = `
+    <div class="settings-inspector-title">Review summary</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">root: ${escHtml(shortenRef(repo.rootDir || "-", 40))}</span>
+      <span class="settings-pill">branch: ${escHtml(repo.branch || "detached")}</span>
+      <span class="settings-pill">dirty: ${escHtml(String(repo.status?.dirtyCount ?? 0))}</span>
+      <span class="settings-pill">untracked: ${escHtml(String(repo.status?.untrackedCount ?? 0))}</span>
+      <span class="settings-pill">worktrees: ${escHtml(String(Array.isArray(review?.worktrees) ? review.worktrees.length : 0))}</span>
+    </div>
+  `;
+}
+
+function renderSessionReviewChanges(review = null) {
+  if (!sessionReviewChangesEl) return;
+  const repo = review?.repository;
+  const changes = Array.isArray(review?.changes) ? review.changes : [];
+  if (!repo?.isGitRepository) {
+    sessionReviewChangesEl.innerHTML = `
+      <div class="settings-inspector-title">Changed files</div>
+      <p class="settings-inspector-empty">review 対象の repository がありません。</p>
+    `;
+    return;
+  }
+  if (changes.length === 0) {
+    sessionReviewChangesEl.innerHTML = `
+      <div class="settings-inspector-title">Changed files</div>
+      <p class="settings-inspector-empty">変更ファイルはありません。</p>
+    `;
+    return;
+  }
+  const items = changes.map((entry) => {
+    const absolutePath = joinWindowsPath(repo.rootDir || "", entry.path || "");
+    return `
+      <details class="settings-review-item">
+        <summary>${escHtml(entry.path || "-")}</summary>
+        <div class="settings-review-meta">${escHtml([
+          entry.kind || "tracked",
+          `${entry.indexStatus || " "} / ${entry.worktreeStatus || " "}`.trim(),
+        ].filter(Boolean).join(" · "))}</div>
+        <div class="settings-action-grid">
+          <button type="button" class="btn-outline" data-review-open-path="${escHtml(absolutePath)}">open</button>
+        </div>
+        <pre class="settings-code-block">${escHtml(entry.diffPreview || "(diff なし)")}</pre>
+      </details>
+    `;
+  }).join("");
+  sessionReviewChangesEl.innerHTML = `
+    <div class="settings-inspector-title">Changed files</div>
+    <div class="settings-review-list">${items}</div>
+  `;
+}
+
+function renderSessionWorktreePanel(status = null) {
+  if (!sessionWorktreePanelEl) return;
+  state.settingsWorktreeStatus = status || null;
+  if (!status?.isGitRepository) {
+    sessionWorktreePanelEl.innerHTML = `
+      <div class="settings-inspector-title">Git worktree</div>
+      <p class="settings-inspector-empty">Git repository ではないため worktree を作成できません。</p>
+    `;
+    return;
+  }
+  sessionWorktreePanelEl.innerHTML = `
+    <div class="settings-inspector-title">Git worktree</div>
+    <table class="settings-table">
+      <tbody>
+        <tr><td>current</td><td>${escHtml(status.currentWorkdir || "-")}</td></tr>
+        <tr><td>repoRoot</td><td>${escHtml(status.repoRoot || "-")}</td></tr>
+        <tr><td>isolated</td><td>${escHtml(status.isIsolated ? "yes" : "no")}</td></tr>
+        <tr><td>suggested</td><td>${escHtml(status.suggestedWorktreePath || "-")}</td></tr>
+      </tbody>
+    </table>
+    <div class="settings-inspector-actions">
+      <button id="btn-session-worktree-ensure" type="button" class="btn-settings-save" ${status.isIsolated ? "disabled" : ""}>isolated worktree を作成</button>
+    </div>
+  `;
+}
+
+function renderSessionLockConflict(payload = null) {
+  if (!sessionLockConflictEl) return;
+  state.settingsLockConflict = payload || null;
+  const conflicts = Array.isArray(payload?.conflicts) ? payload.conflicts : [];
+  if (conflicts.length === 0) {
+    sessionLockConflictEl.innerHTML = `
+      <div class="settings-inspector-title">Conflict warning</div>
+      <p class="settings-inspector-empty">contested symbol はありません。</p>
+    `;
+    return;
+  }
+  const rows = conflicts.map((entry) => `<li>${escHtml(`${entry.agentName} :: ${entry.filePath} :: ${entry.symbol}`)}</li>`).join("");
+  sessionLockConflictEl.innerHTML = `
+    <div class="settings-inspector-title">Conflict warning</div>
+    <div class="settings-warning-box">
+      <strong>${escHtml(payload?.error || "同じ symbol が他 agent により lock 中です。")}</strong>
+      <ul>${rows}</ul>
+    </div>
+  `;
+}
+
+function renderSessionLocksPanel(locks = []) {
+  if (!sessionLocksPanelEl) return;
+  if (!Array.isArray(locks) || locks.length === 0) {
+    sessionLocksPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Semantic locks</div>
+      <p class="settings-inspector-empty">lock はありません。</p>
+    `;
+    return;
+  }
+  const rows = locks.map((entry) => `
+    <tr>
+      <td>
+        <strong>${escHtml(entry.agentName)}</strong>
+        <div class="settings-audit-meta">${escHtml(`${entry.filePath} :: ${entry.symbol}`)}</div>
+      </td>
+      <td>
+        <div>${escHtml(entry.note || "-")}</div>
+        <div class="settings-row-actions">
+          <button type="button" class="btn-outline" data-lock-release-id="${escHtml(entry.id)}">release</button>
+        </div>
+      </td>
+    </tr>
+  `).join("");
+  sessionLocksPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Semantic locks</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionExtensionDashboard(overview = null) {
+  if (!sessionExtensionDashboardPanelEl) return;
+  state.settingsExtensionsOverview = overview || null;
+  const dashboard = overview?.dashboard;
+  if (!dashboard) {
+    sessionExtensionDashboardPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Daemon / dashboard</div>
+      <p class="settings-inspector-empty">dashboard 情報はまだありません。</p>
+    `;
+    return;
+  }
+  sessionExtensionDashboardPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Daemon / dashboard</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">transport: ${escHtml(dashboard.runtime?.transportMode || "-")}</span>
+      <span class="settings-pill">app: ${escHtml(dashboard.runtime?.appVersion || "-")}</span>
+      <span class="settings-pill">codex: ${escHtml(dashboard.runtime?.codexVersion || "-")}</span>
+      <span class="settings-pill">auth: ${escHtml(dashboard.security?.authMode || "-")}</span>
+    </div>
+    <table class="settings-table">
+      <tbody>
+        <tr><td>baseWorkdir</td><td>${escHtml(dashboard.runtime?.baseWorkdir || "-")}</td></tr>
+        <tr><td>defaultProfile</td><td>${escHtml(dashboard.runtime?.defaultProfile || "-")}</td></tr>
+        <tr><td>sandbox</td><td>${escHtml(dashboard.security?.codexSandboxMode || "default")}</td></tr>
+        <tr><td>approval</td><td>${escHtml(dashboard.security?.codexApprovalPolicy || "default")}</td></tr>
+      </tbody>
+    </table>
+    <div class="settings-pill-row">
+      <span class="settings-pill">claims ${escHtml(String(dashboard.counts?.claims ?? 0))}</span>
+      <span class="settings-pill">handoffs ${escHtml(String(dashboard.counts?.handoffs ?? 0))}</span>
+      <span class="settings-pill">schedules ${escHtml(String(dashboard.counts?.schedules ?? 0))}</span>
+      <span class="settings-pill">warnings ${escHtml(String(dashboard.counts?.terminalWarnings ?? 0))}</span>
+      <span class="settings-pill">locks ${escHtml(String(dashboard.counts?.locks ?? 0))}</span>
+      <span class="settings-pill">changes ${escHtml(String(dashboard.counts?.changedFiles ?? 0))}</span>
+    </div>
+  `;
+}
+
+function renderSessionTaskBoard(board = null) {
+  if (!sessionTaskBoardPanelEl) return;
+  const columns = Array.isArray(board?.columns) ? board.columns : [];
+  if (columns.length === 0) {
+    sessionTaskBoardPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Task board</div>
+      <p class="settings-inspector-empty">task board はまだありません。</p>
+    `;
+    return;
+  }
+  const content = columns.map((column) => {
+    const items = Array.isArray(column.items) ? column.items : [];
+    return `
+      <section class="settings-kanban-column">
+        <h5>${escHtml(column.title || "-")}</h5>
+        ${items.length > 0
+          ? items.map((item) => `
+              <article class="settings-kanban-item">
+                <strong>${escHtml(item.title || "-")}</strong>
+                <div class="settings-audit-meta">${escHtml(item.meta || "-")}</div>
+                <div class="settings-review-meta">${escHtml(item.detail || "-")}</div>
+              </article>
+            `).join("")
+          : `<p class="settings-inspector-empty">empty</p>`}
+      </section>
+    `;
+  }).join("");
+  sessionTaskBoardPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Task board</div>
+    <div class="settings-kanban">${content}</div>
+  `;
+}
+
+function renderSessionValidationPanel(validation = null) {
+  if (!sessionValidationPanelEl) return;
+  const checks = Array.isArray(validation?.checks) ? validation.checks : [];
+  if (checks.length === 0) {
+    sessionValidationPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Workflow validation</div>
+      <p class="settings-inspector-empty">validation 結果はまだありません。</p>
+    `;
+    return;
+  }
+  const rows = checks.map((entry) => `
+    <tr>
+      <td>
+        <span class="settings-status-badge status-${escHtml(entry.status || "info")}">${escHtml(entry.status || "info")}</span>
+      </td>
+      <td>
+        <strong>${escHtml(entry.summary || "-")}</strong>
+        <div class="settings-audit-meta">${escHtml(entry.detail || "-")}</div>
+      </td>
+    </tr>
+  `).join("");
+  sessionValidationPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Workflow validation</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">overall: ${escHtml(validation?.status || "ok")}</span>
+    </div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionDriftPanel(terminalStates = []) {
+  if (!sessionDriftPanelEl) return;
+  const warned = (Array.isArray(terminalStates) ? terminalStates : []).filter((entry) => entry.warningCode || entry.warningMessage);
+  if (warned.length === 0) {
+    sessionDriftPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Drift detection</div>
+      <p class="settings-inspector-empty">drift warning はありません。</p>
+    `;
+    return;
+  }
+  const rows = warned.map((entry) => `
+    <tr>
+      <td><strong>${escHtml(entry.agentName || "-")}</strong></td>
+      <td>${escHtml(entry.warningCode || "-")}<div class="settings-audit-meta">${escHtml(entry.warningMessage || "-")}</div></td>
+    </tr>
+  `).join("");
+  sessionDriftPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Drift detection</div>
+    <table class="settings-table"><tbody>${rows}</tbody></table>
+  `;
+}
+
+function renderSessionMemoryAutomationPanel() {
+  if (!sessionMemoryAutomationPanelEl) return;
+  sessionMemoryAutomationPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Memory automation</div>
+    <div class="settings-action-grid">
+      <button type="button" class="btn-outline" data-memory-preview-scope="consolidation">workspace memory preview</button>
+      <button type="button" class="btn-outline" data-memory-preview-scope="diary">AI diary preview</button>
+      <button type="button" class="btn-outline" data-memory-preview-scope="dreaming">Dreaming preview</button>
+    </div>
+  `;
+}
+
+function renderSessionMemoryAutomationPreview(preview = null) {
+  if (!sessionMemoryAutomationPreviewEl) return;
+  state.settingsMemoryAutomationPreview = preview || null;
+  if (!preview?.scope) {
+    sessionMemoryAutomationPreviewEl.innerHTML = `
+      <div class="settings-inspector-title">Automation preview</div>
+      <p class="settings-inspector-empty">preview を選ぶと diff をここに表示します。</p>
+    `;
+    return;
+  }
+  const targetPath = preview.diaryPath || preview.path || "";
+  sessionMemoryAutomationPreviewEl.innerHTML = `
+    <div class="settings-inspector-title">Automation preview · ${escHtml(preview.scope)}</div>
+    <table class="settings-table">
+      <tbody>
+        <tr><td>workspace</td><td>${escHtml(preview.workspaceName || preview.workspaceId || "-")}</td></tr>
+        <tr><td>target</td><td>${escHtml(targetPath || "-")}</td></tr>
+        <tr><td>backup</td><td>${escHtml(preview.backupPath || "-")}</td></tr>
+        <tr><td>tokenEstimate</td><td>${escHtml(String(preview.tokenEstimate ?? "-"))}</td></tr>
+      </tbody>
+    </table>
+    <pre class="settings-code-block">${escHtml(preview.diff || "(diff なし)")}</pre>
+    <div class="settings-inspector-actions">
+      <button id="btn-session-memory-automation-apply" type="button" class="btn-settings-save">apply</button>
+    </div>
+  `;
+}
+
+function renderSessionSkillsPanel(registry = null, plan = null) {
+  if (!sessionSkillsPanelEl) return;
+  state.settingsSkillPlan = plan || null;
+  const rows = [];
+  for (const agentPlan of Array.isArray(plan?.plans) ? plan.plans : []) {
+    for (const target of Array.isArray(agentPlan.targets) ? agentPlan.targets : []) {
+      for (const operation of Array.isArray(target.operations) ? target.operations : []) {
+        rows.push(`
+          <tr>
+            <td><strong>${escHtml(agentPlan.agentName)}</strong><div class="settings-audit-meta">${escHtml(operation.skillId || "-")}</div></td>
+            <td>${escHtml(operation.action || "-")}<div class="settings-audit-meta">${escHtml(operation.destinationPath || "-")}</div></td>
+          </tr>
+        `);
+      }
+    }
+  }
+  sessionSkillsPanelEl.innerHTML = `
+    <div class="settings-inspector-title">Skill registry</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">skills: ${escHtml(String(registry?.skillCount ?? 0))}</span>
+      <span class="settings-pill">targets: ${escHtml(String(Array.isArray(registry?.targetTypes) ? registry.targetTypes.length : 0))}</span>
+    </div>
+    <div class="settings-action-grid">
+      <button type="button" class="btn-outline" data-skill-sync-action="plan">plan</button>
+      <button type="button" class="btn-settings-save" data-skill-sync-action="apply">apply</button>
+    </div>
+    ${rows.length > 0 ? `<table class="settings-table"><tbody>${rows.join("")}</tbody></table>` : `<p class="settings-inspector-empty">plan はまだありません。</p>`}
+  `;
+}
+
+function renderSessionMcpPanel(registry = null, plan = null) {
+  if (!sessionMcpPanelEl) return;
+  state.settingsMcpPlan = plan || null;
+  const rows = [];
+  for (const agentPlan of Array.isArray(plan?.plans) ? plan.plans : []) {
+    for (const target of Array.isArray(agentPlan.targets) ? agentPlan.targets : []) {
+      rows.push(`
+        <tr>
+          <td><strong>${escHtml(agentPlan.agentName)}</strong><div class="settings-audit-meta">${escHtml((target.serverIds || []).join(", ") || "-")}</div></td>
+          <td>${escHtml(target.action || "-")}<div class="settings-audit-meta">${escHtml(target.destinationPath || "-")}</div></td>
+        </tr>
+      `);
+    }
+  }
+  sessionMcpPanelEl.innerHTML = `
+    <div class="settings-inspector-title">MCP settings</div>
+    <div class="settings-pill-row">
+      <span class="settings-pill">servers: ${escHtml(String(registry?.serverCount ?? 0))}</span>
+      <span class="settings-pill">targets: ${escHtml(String(Array.isArray(registry?.targetTypes) ? registry.targetTypes.length : 0))}</span>
+    </div>
+    <div class="settings-action-grid">
+      <button type="button" class="btn-outline" data-mcp-sync-action="plan">plan</button>
+      <button type="button" class="btn-settings-save" data-mcp-sync-action="apply">apply</button>
+    </div>
+    ${rows.length > 0 ? `<table class="settings-table"><tbody>${rows.join("")}</tbody></table>` : `<p class="settings-inspector-empty">plan はまだありません。</p>`}
+  `;
+}
+
+function renderSessionAutomationLoading() {
+  const loadingText = `<p class="settings-inspector-empty">読み込み中...</p>`;
+  if (sessionExtensionDashboardPanelEl) {
+    sessionExtensionDashboardPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Daemon / dashboard</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionTaskBoardPanelEl) {
+    sessionTaskBoardPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Task board</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionValidationPanelEl) {
+    sessionValidationPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Workflow validation</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionDriftPanelEl) {
+    sessionDriftPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Drift detection</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionMemoryAutomationPanelEl) {
+    sessionMemoryAutomationPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Memory automation</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionMemoryAutomationPreviewEl && !state.settingsMemoryAutomationPreview?.scope) {
+    sessionMemoryAutomationPreviewEl.innerHTML = `
+      <div class="settings-inspector-title">Automation preview</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionSkillsPanelEl) {
+    sessionSkillsPanelEl.innerHTML = `
+      <div class="settings-inspector-title">Skill registry</div>
+      ${loadingText}
+    `;
+  }
+  if (sessionMcpPanelEl) {
+    sessionMcpPanelEl.innerHTML = `
+      <div class="settings-inspector-title">MCP settings</div>
+      ${loadingText}
+    `;
+  }
+}
+
+async function loadSessionReview(workspaceId) {
+  if (!workspaceId) return;
+  populateWorkspaceMemberSelect(sessionLockAgentEl, workspaceId);
+  try {
+    const [reviewRes, worktreeRes, locksRes] = await Promise.all([
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/review`),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/worktree`),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/locks`),
+    ]);
+    const review = reviewRes.ok ? await reviewRes.json() : null;
+    const worktree = worktreeRes.ok ? await worktreeRes.json() : null;
+    const locks = locksRes.ok ? await locksRes.json() : [];
+    renderSessionReviewSummary(review);
+    renderSessionReviewChanges(review);
+    renderSessionWorktreePanel(worktree);
+    renderSessionLocksPanel(locks);
+    if (!state.settingsLockConflict?.conflicts?.length) {
+      renderSessionLockConflict(null);
+    }
+    setInlineHint(
+      sessionReviewHintEl,
+      `dirty=${review?.repository?.status?.dirtyCount ?? 0} / locks=${Array.isArray(locks) ? locks.length : 0} / isolated=${worktree?.isIsolated ? "yes" : "no"}`,
+    );
+  } catch {
+    renderSessionReviewSummary(null);
+    renderSessionReviewChanges(null);
+    renderSessionWorktreePanel(null);
+    renderSessionLocksPanel([]);
+    renderSessionLockConflict(null);
+    setInlineHint(sessionReviewHintEl, "review 情報の取得に失敗しました。");
+  }
+}
+
+async function loadSessionAutomation(workspaceId) {
+  if (!workspaceId) return;
+  renderSessionAutomationLoading();
+  setInlineHint(sessionAutomationHintEl, "automation 情報を読み込み中です...");
+  try {
+    const [overviewRes, terminalStatesRes, skillsRegistryRes, skillPlanRes, mcpRegistryRes, mcpPlanRes] = await Promise.all([
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/extensions/overview`),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/terminal-states`),
+      fetch("/api/skills/registry"),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/skills/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      fetch("/api/mcp/registry"),
+      fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/mcp/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    ]);
+    const overview = overviewRes.ok ? await overviewRes.json() : null;
+    const terminalStates = terminalStatesRes.ok ? await terminalStatesRes.json() : [];
+    const skillsRegistry = skillsRegistryRes.ok ? await skillsRegistryRes.json() : null;
+    const skillPlan = skillPlanRes.ok ? await skillPlanRes.json() : null;
+    const mcpRegistry = mcpRegistryRes.ok ? await mcpRegistryRes.json() : null;
+    const mcpPlan = mcpPlanRes.ok ? await mcpPlanRes.json() : null;
+    renderSessionExtensionDashboard(overview);
+    renderSessionTaskBoard(overview?.board);
+    renderSessionValidationPanel(overview?.validation);
+    renderSessionDriftPanel(terminalStates);
+    renderSessionMemoryAutomationPanel();
+    if (state.settingsMemoryAutomationPreview?.workspaceId !== workspaceId) {
+      renderSessionMemoryAutomationPreview(null);
+    } else {
+      renderSessionMemoryAutomationPreview(state.settingsMemoryAutomationPreview);
+    }
+    renderSessionSkillsPanel(skillsRegistry, skillPlan);
+    renderSessionMcpPanel(mcpRegistry, mcpPlan);
+    setInlineHint(
+      sessionAutomationHintEl,
+      `warnings=${Array.isArray(terminalStates) ? terminalStates.filter((entry) => entry.warningCode).length : 0} / schedules=${overview?.dashboard?.counts?.schedules ?? 0} / skills=${skillsRegistry?.skillCount ?? 0} / mcp=${mcpRegistry?.serverCount ?? 0}`,
+    );
+  } catch {
+    renderSessionExtensionDashboard(null);
+    renderSessionTaskBoard(null);
+    renderSessionValidationPanel(null);
+    renderSessionDriftPanel([]);
+    renderSessionMemoryAutomationPanel();
+    renderSessionMemoryAutomationPreview(null);
+    renderSessionSkillsPanel(null, null);
+    renderSessionMcpPanel(null, null);
+    setInlineHint(sessionAutomationHintEl, "automation 情報の取得に失敗しました。");
+  }
+}
+
+async function refreshSessionInspector(workspaceId) {
+  if (!workspaceId) return;
+  await Promise.all([
+    loadSessionDurability(workspaceId),
+    loadSessionGitSafety(workspaceId),
+    loadSessionCoordination(workspaceId),
+    loadSessionProfile(workspaceId),
+    loadSessionReview(workspaceId),
+    loadSessionAutomation(workspaceId),
+  ]);
 }
 
 async function loadRuntimeInfo(force = false) {
@@ -904,6 +1869,15 @@ function formatMessageTime(value = Date.now()) {
   return normalizeMessageDate(value).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatSettingsDateTime(value = Date.now()) {
+  return normalizeMessageDate(value).toLocaleString("ja-JP", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function ts() {
   return formatMessageTime();
 }
@@ -1200,34 +2174,223 @@ function getWorkspaceById(workspaceId = state.workspaceId) {
 }
 
 function getSidebarActiveWorkspaces() {
-  return state.workspaces.filter((workspace) => workspace.isSidebarActive);
+  return [...state.workspaces];
 }
 
 function getSidebarInactiveWorkspaces() {
-  return state.workspaces.filter((workspace) => !workspace.isSidebarActive);
+  return [];
+}
+
+function getWorkspaceTerminalStateKey(workspaceId, agentName) {
+  return `${workspaceId}:${agentName}`;
+}
+
+function normalizeWorkspaceTerminalState(workspaceId, agentName, snapshot = {}) {
+  return {
+    agentName,
+    workspaceId,
+    status: String(snapshot.status || "idle"),
+    hasProcess: Boolean(snapshot.hasProcess),
+    readyForPrompt: Boolean(snapshot.readyForPrompt),
+    lastOutputAt: snapshot.lastOutputAt ?? null,
+    runId: snapshot.runId ?? null,
+    configStale: Boolean(snapshot.configStale),
+    configWarning: String(snapshot.configWarning || ""),
+    warningCode: String(snapshot.warningCode || ""),
+    warningMessage: String(snapshot.warningMessage || ""),
+    approvalRequest: snapshot.approvalRequest || null,
+    quotaNotice: snapshot.quotaNotice || null,
+  };
+}
+
+function setWorkspaceTerminalState(workspaceId, agentName, snapshot = {}) {
+  if (!workspaceId || !agentName) {
+    return normalizeWorkspaceTerminalState(workspaceId, agentName, snapshot);
+  }
+  const normalized = normalizeWorkspaceTerminalState(workspaceId, agentName, snapshot);
+  state.workspaceTerminalStates.set(getWorkspaceTerminalStateKey(workspaceId, agentName), normalized);
+  return normalized;
+}
+
+function getWorkspaceTerminalStateSnapshot(workspaceId, agentName) {
+  return state.workspaceTerminalStates.get(getWorkspaceTerminalStateKey(workspaceId, agentName))
+    ?? normalizeWorkspaceTerminalState(workspaceId, agentName, {});
+}
+
+function getSidebarTerminalStateMeta(workspaceId, agentName) {
+  const snapshot = getWorkspaceTerminalStateSnapshot(workspaceId, agentName);
+  if (!snapshot.hasProcess) {
+    return { snapshot, label: "起動前", badgeClass: "not-started", dotStatus: "stopped", canStart: true };
+  }
+  if (snapshot.status === "error") {
+    return { snapshot, label: "エラー", badgeClass: "error", dotStatus: "error", canStart: false };
+  }
+  if (snapshot.status === "running") {
+    return { snapshot, label: "実行中", badgeClass: "running", dotStatus: "running", canStart: false };
+  }
+  if (snapshot.status === "waiting_input") {
+    return { snapshot, label: "入力待ち", badgeClass: "waiting-input", dotStatus: "waiting_input", canStart: false };
+  }
+  if (snapshot.status === "quota_wait") {
+    return { snapshot, label: "利用制限待ち", badgeClass: "quota-wait", dotStatus: "waiting_input", canStart: false };
+  }
+  if (snapshot.readyForPrompt || snapshot.status === "idle") {
+    return { snapshot, label: "稼働中", badgeClass: "ready", dotStatus: "idle", canStart: false };
+  }
+  return { snapshot, label: "起動中", badgeClass: "starting", dotStatus: "running", canStart: false };
 }
 
 function clearSidebarDragState() {
   state.sidebarDrag = null;
-  sessionSidebarEl?.querySelectorAll(".drop-target, .dragging").forEach((el) => {
-    el.classList.remove("drop-target", "dragging");
+  sessionSidebarEl?.querySelectorAll(".dragging").forEach((el) => {
+    el.classList.remove("dragging");
+  });
+  clearSidebarDropIndicators();
+  if (state.sidebarPendingRender) {
+    renderSessionSidebar();
+  }
+}
+
+function clearSidebarDropIndicators() {
+  sessionSidebarEl?.querySelectorAll(".drop-target, .drop-before, .drop-after").forEach((el) => {
+    el.classList.remove("drop-target", "drop-before", "drop-after");
   });
 }
 
-function buildWorkspaceLayoutFromLists(activeIds, inactiveIds) {
-  return [
-    ...activeIds.map((id, index) => ({ id, isSidebarActive: true, sortOrder: index })),
-    ...inactiveIds.map((id, index) => ({ id, isSidebarActive: false, sortOrder: index })),
-  ];
+function setSidebarDropTarget(card, position = "after") {
+  if (!sessionSidebarEl || !card) return;
+  sessionSidebarEl
+    .querySelectorAll(".session-card.drop-target, .session-card.drop-before, .session-card.drop-after")
+    .forEach((el) => {
+      if (el !== card) {
+        el.classList.remove("drop-target", "drop-before", "drop-after");
+      }
+    });
+  card.classList.add("drop-target");
+  card.classList.toggle("drop-before", position === "before");
+  card.classList.toggle("drop-after", position !== "before");
+}
+
+function getSidebarDropPosition(card, clientY, target = null) {
+  const header = card?.querySelector(".session-card-header");
+  const accordion = card?.querySelector(".session-card-accordion");
+  if (accordion && !accordion.hidden && target && accordion.contains(target)) {
+    return "after";
+  }
+  if (header) {
+    const headerRect = header.getBoundingClientRect();
+    if (clientY >= headerRect.bottom) {
+      return "after";
+    }
+    return clientY < headerRect.top + headerRect.height / 2 ? "before" : "after";
+  }
+  const rect = card.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function getSidebarSections() {
+  return sessionSidebarEl ? [...sessionSidebarEl.querySelectorAll(".session-sidebar-section")] : [];
+}
+
+function getSidebarSectionForPoint(clientX, clientY) {
+  const sections = getSidebarSections();
+  if (sections.length === 0) return null;
+  const containing = sections.find((section) => {
+    const rect = section.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+  });
+  if (containing) return containing;
+  return sections.reduce((best, section) => {
+    const rect = section.getBoundingClientRect();
+    const verticalDistance = clientY < rect.top
+      ? rect.top - clientY
+      : clientY > rect.bottom
+        ? clientY - rect.bottom
+        : 0;
+    if (!best || verticalDistance < best.distance) {
+      return { section, distance: verticalDistance };
+    }
+    return best;
+  }, null)?.section ?? sections[0];
+}
+
+function resolveSidebarDropDestination(event) {
+  if (!sessionSidebarEl || !state.sidebarDrag) return null;
+  const clientX = Number(event?.clientX);
+  const clientY = Number(event?.clientY);
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const pointTarget = document.elementFromPoint(clientX, clientY);
+  const eventTarget = event?.target instanceof Element ? event.target : null;
+  const targetEl = pointTarget instanceof Element ? pointTarget : eventTarget;
+  const sectionEl = targetEl?.closest(".session-sidebar-section") ?? getSidebarSectionForPoint(clientX, clientY);
+  if (!sectionEl) return null;
+  const sectionKey = sectionEl.dataset.sidebarSection;
+  const cards = [...sectionEl.querySelectorAll(".session-card")]
+    .filter((card) => card.dataset.workspaceId !== state.sidebarDrag.workspaceId);
+  const pointedCard = targetEl?.closest(".session-card");
+  if (pointedCard && pointedCard.dataset.workspaceId !== state.sidebarDrag.workspaceId) {
+    return {
+      sectionEl,
+      sectionKey,
+      card: pointedCard,
+      position: getSidebarDropPosition(pointedCard, clientY, targetEl),
+    };
+  }
+  if (cards.length === 0) {
+    return { sectionEl, sectionKey, card: null, position: "after" };
+  }
+  for (const card of cards) {
+    const rect = card.getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      return { sectionEl, sectionKey, card, position: "before" };
+    }
+    if (clientY <= rect.bottom) {
+      return {
+        sectionEl,
+        sectionKey,
+        card,
+        position: getSidebarDropPosition(card, clientY, targetEl),
+      };
+    }
+  }
+  return {
+    sectionEl,
+    sectionKey,
+    card: cards.at(-1) ?? null,
+    position: "after",
+  };
+}
+
+function applySidebarDropDestination(destination) {
+  clearSidebarDropIndicators();
+  if (!destination?.sectionEl) return;
+  destination.sectionEl.classList.add("drop-target");
+  if (destination.card) {
+    setSidebarDropTarget(destination.card, destination.position);
+  }
+}
+
+function commitSidebarDrop(destination) {
+  if (!state.sidebarDrag || !destination?.sectionKey) return;
+  const layout = buildWorkspaceLayoutForDrop(
+    state.sidebarDrag.workspaceId,
+    destination.card?.dataset.workspaceId ?? null,
+    destination.sectionKey,
+    destination.position ?? "after",
+  );
+  clearSidebarDragState();
+  void saveWorkspaceLayout(layout);
+}
+
+function buildWorkspaceLayoutFromIds(workspaceIds) {
+  return workspaceIds.map((id, index) => ({ id, isSidebarActive: true, sortOrder: index }));
 }
 
 function buildWorkspaceLayoutForDrop(draggedWorkspaceId, targetWorkspaceId, targetSection, position = "after") {
-  const activeIds = getSidebarActiveWorkspaces().map((workspace) => workspace.id).filter((id) => id !== draggedWorkspaceId);
-  const inactiveIds = getSidebarInactiveWorkspaces().map((workspace) => workspace.id).filter((id) => id !== draggedWorkspaceId);
-  const destinationIds = targetSection === "active" ? activeIds : inactiveIds;
-  const fallbackIndex = destinationIds.length;
+  const workspaceIds = getSidebarActiveWorkspaces().map((workspace) => workspace.id).filter((id) => id !== draggedWorkspaceId);
+  const fallbackIndex = workspaceIds.length;
   const targetIndex = targetWorkspaceId
-    ? destinationIds.indexOf(targetWorkspaceId)
+    ? workspaceIds.indexOf(targetWorkspaceId)
     : -1;
   const insertIndex =
     targetIndex < 0
@@ -1236,12 +2399,8 @@ function buildWorkspaceLayoutForDrop(draggedWorkspaceId, targetWorkspaceId, targ
         ? targetIndex
         : targetIndex + 1;
 
-  destinationIds.splice(Math.max(0, insertIndex), 0, draggedWorkspaceId);
-  if (targetSection === "active" && destinationIds.length > MAX_ACTIVE_WORKSPACES) {
-    inactiveIds.unshift(...destinationIds.splice(MAX_ACTIVE_WORKSPACES));
-  }
-
-  return buildWorkspaceLayoutFromLists(activeIds, inactiveIds);
+  workspaceIds.splice(Math.max(0, insertIndex), 0, draggedWorkspaceId);
+  return buildWorkspaceLayoutFromIds(workspaceIds);
 }
 
 function hasWorkspaceSelection(workspaceId = state.workspaceId) {
@@ -1350,6 +2509,7 @@ function toggleExpandedSession(workspaceId) {
     state.expandedSessions.delete(workspaceId);
   } else {
     state.expandedSessions.add(workspaceId);
+    void loadWorkspaceTerminalStates(workspaceId);
   }
   renderSessionSidebar();
 }
@@ -1498,6 +2658,13 @@ function connectSSE() {
     "approval.requested",
     "approval.expired",
     "approval.resolved",
+    "coordination.updated",
+    "coordination.notice",
+    "schedule.changed",
+    "semantic-lock.updated",
+    "semantic-lock.notice",
+    "workspace.rollback",
+    "workspace.worktree.updated",
     "workspace.switched",
   ].forEach((type) => es.addEventListener(type, handleEvent));
 
@@ -1597,6 +2764,15 @@ function handleCanonicalEvent(event) {
       break;
 
     case "status.change":
+      if (workspaceId && agentName) {
+        const currentSnapshot = getWorkspaceTerminalStateSnapshot(workspaceId, agentName);
+        setWorkspaceTerminalState(workspaceId, agentName, {
+          ...currentSnapshot,
+          status: event.status,
+          hasProcess: event.status !== "idle" ? true : currentSnapshot.hasProcess,
+          readyForPrompt: event.status === "idle" ? true : currentSnapshot.readyForPrompt,
+        });
+      }
       if (relevantToTerminal && event.status === "running" && terminal.runtimeState !== "running") {
         registerTerminalMarker("model-start", terminal.remoteTurnPromptSummary || `${agentName} responding`, {
           activate: false,
@@ -1659,6 +2835,71 @@ function handleCanonicalEvent(event) {
       if (relevantToTerminal) {
         terminal.approvalRequest = event.approval || null;
         renderTerminalHeader();
+      }
+      break;
+
+    case "coordination.updated":
+      if ((state.settingsWorkspaceId || state.workspaceId) === workspaceId) {
+        renderSessionCoordinationSummary(event.context || null);
+        renderSessionClaimsPanel(event.context || null);
+        renderSessionHandoffsPanel(event.context || null);
+        setInlineHint(
+          sessionCoordinationHintEl,
+          `owner=${event.context?.ownerAgentName || "none"} / claims=${Array.isArray(event.context?.claims) ? event.context.claims.length : 0} / handoffs=${Array.isArray(event.context?.handoffQueue) ? event.context.handoffQueue.length : 0}`,
+        );
+        void loadSessionDurability(workspaceId);
+      }
+      break;
+
+    case "coordination.notice":
+      if (relevantToTerminal && event.message) {
+        registerTerminalMarker("notice", event.message, { activate: false });
+      }
+      if (workspaceId === state.workspaceId && event.message) {
+        showToast(`🧭 ${event.message}`, "info", 4500);
+      }
+      break;
+
+    case "schedule.changed":
+      if (state.settingsWorkspaceId || state.workspaceId) {
+        void loadSessionAutomation(state.settingsWorkspaceId || state.workspaceId);
+      }
+      break;
+
+    case "semantic-lock.updated":
+      if ((state.settingsWorkspaceId || state.workspaceId) === workspaceId) {
+        renderSessionLocksPanel(event.locks || []);
+        setInlineHint(
+          sessionReviewHintEl,
+          `dirty=${state.settingsReviewSnapshot?.repository?.status?.dirtyCount ?? 0} / locks=${Array.isArray(event.locks) ? event.locks.length : 0} / isolated=${state.settingsWorktreeStatus?.isIsolated ? "yes" : "no"}`,
+        );
+      }
+      break;
+
+    case "semantic-lock.notice":
+      if (terminal.workspaceId === workspaceId && event.message) {
+        registerTerminalMarker("notice", event.message, { activate: false });
+      }
+      if (workspaceId === state.workspaceId && event.message) {
+        showToast(`🔒 ${event.message}`, "warning", 5000);
+      }
+      break;
+
+    case "workspace.rollback":
+      if (workspaceId === state.workspaceId) {
+        showToast("↩️ rollback を適用しました", "warning", 5000);
+        void refreshSessionInspector(workspaceId);
+        void refreshMessageHistory(workspaceId);
+      }
+      break;
+
+    case "workspace.worktree.updated":
+      if (workspaceId) {
+        void loadWorkspaces();
+        void loadSessionReview(workspaceId);
+      }
+      if (workspaceId === state.workspaceId && event.worktreePath) {
+        showToast(`🌿 isolated worktree: ${event.worktreePath}`, "success", 5000);
       }
       break;
 
@@ -1739,6 +2980,11 @@ function renderAgentList() {
 
 function renderSessionSidebar() {
   if (!sessionSidebarEl) return;
+  if (state.sidebarDrag) {
+    state.sidebarPendingRender = true;
+    return;
+  }
+  state.sidebarPendingRender = false;
   state.sidebarDrag = null;
   sessionSidebarEl.innerHTML = "";
 
@@ -1766,16 +3012,10 @@ function renderSessionSidebar() {
 
   const sections = [
     {
-      key: "active",
-      label: `active workspaces (${getSidebarActiveWorkspaces().length}/${MAX_ACTIVE_WORKSPACES})`,
-      hint: "起動後に上から順次 CLI を自動起動",
+      key: "all",
+      label: `workspaces (${getSidebarActiveWorkspaces().length})`,
+      hint: "CLI は Start ボタン、main chat、terminal 補助入力の送信時に起動します",
       workspaces: getSidebarActiveWorkspaces(),
-    },
-    {
-      key: "inactive",
-      label: `inactive workspaces (${getSidebarInactiveWorkspaces().length})`,
-      hint: "Chat 送信時 / Terminal 表示時に lazy 起動",
-      workspaces: getSidebarInactiveWorkspaces(),
     },
   ];
 
@@ -1791,37 +3031,11 @@ function renderSessionSidebar() {
       <div class="session-sidebar-section-body"></div>
     `;
     const bodyEl = sectionEl.querySelector(".session-sidebar-section-body");
-    sectionEl.addEventListener("dragover", (event) => {
-      if (!state.sidebarDrag) return;
-      event.preventDefault();
-      sectionEl.classList.add("drop-target");
-    });
-    sectionEl.addEventListener("dragleave", (event) => {
-      if (!sectionEl.contains(event.relatedTarget)) {
-        sectionEl.classList.remove("drop-target");
-      }
-    });
-    sectionEl.addEventListener("drop", (event) => {
-      if (!state.sidebarDrag) return;
-      event.preventDefault();
-      sectionEl.classList.remove("drop-target");
-      const lastWorkspaceId = section.workspaces.at(-1)?.id ?? null;
-      const layout = buildWorkspaceLayoutForDrop(
-        state.sidebarDrag.workspaceId,
-        lastWorkspaceId,
-        section.key,
-        "after",
-      );
-      clearSidebarDragState();
-      void saveWorkspaceLayout(layout);
-    });
 
     if (section.workspaces.length === 0) {
       const empty = document.createElement("div");
       empty.className = "session-sidebar-section-empty";
-      empty.textContent = section.key === "active"
-        ? "active workspace はまだありません"
-        : "inactive workspace はまだありません";
+      empty.textContent = "workspace はまだありません";
       bodyEl?.appendChild(empty);
     }
 
@@ -1830,13 +3044,15 @@ function renderSessionSidebar() {
       const members = getWorkspaceAgents(workspace.id);
       const children = members.filter((entry) => !entry.isParent);
       const isExpanded = state.expandedSessions.has(workspace.id);
+      if (isExpanded && !state.workspaceTerminalStateLoaded.has(workspace.id) && !state.workspaceTerminalStatePending.has(workspace.id)) {
+        void loadWorkspaceTerminalStates(workspace.id);
+      }
       const parentTheme = getAgentTheme(parentAgent);
       const card = document.createElement("div");
       card.className = `session-card ${workspace.id === state.workspaceId ? "active" : ""}`;
       card.dataset.agentTheme = parentTheme.key;
       card.dataset.workspaceId = workspace.id;
       card.dataset.sidebarSection = section.key;
-      card.draggable = true;
       card.setAttribute("style", buildAgentThemeStyle(parentAgent));
       card.innerHTML = `
         <div class="session-card-header">
@@ -1844,6 +3060,7 @@ function renderSessionSidebar() {
             type="button"
             class="session-drag-handle"
             data-session-drag="${workspace.id}"
+            draggable="true"
             title="並び替え"
             aria-label="${escHtml(workspace.name)} をドラッグして並び替え"
           >⋮⋮</button>
@@ -1861,7 +3078,8 @@ function renderSessionSidebar() {
         </div>
         <div class="session-card-accordion" ${isExpanded ? "" : "hidden"}></div>
       `;
-      card.addEventListener("dragstart", (event) => {
+      const dragHandle = card.querySelector(`[data-session-drag="${workspace.id}"]`);
+      dragHandle?.addEventListener("dragstart", (event) => {
         state.sidebarDrag = { workspaceId: workspace.id, sourceSection: section.key };
         card.classList.add("dragging");
         event.dataTransfer?.setData("text/plain", workspace.id);
@@ -1869,51 +3087,32 @@ function renderSessionSidebar() {
           event.dataTransfer.effectAllowed = "move";
         }
       });
-      card.addEventListener("dragend", () => {
+      dragHandle?.addEventListener("dragend", () => {
         clearSidebarDragState();
-      });
-      card.addEventListener("dragover", (event) => {
-        if (!state.sidebarDrag || state.sidebarDrag.workspaceId === workspace.id) return;
-        event.preventDefault();
-        card.classList.add("drop-target");
-      });
-      card.addEventListener("dragleave", (event) => {
-        if (!card.contains(event.relatedTarget)) {
-          card.classList.remove("drop-target");
-        }
-      });
-      card.addEventListener("drop", (event) => {
-        if (!state.sidebarDrag || state.sidebarDrag.workspaceId === workspace.id) return;
-        event.preventDefault();
-        const rect = card.getBoundingClientRect();
-        const position = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
-        const layout = buildWorkspaceLayoutForDrop(
-          state.sidebarDrag.workspaceId,
-          workspace.id,
-          section.key,
-          position,
-        );
-        clearSidebarDragState();
-        void saveWorkspaceLayout(layout);
       });
       const accordion = card.querySelector(".session-card-accordion");
       for (const member of members) {
         const agent = getSelectedAgentInfo(member.agentName);
+        const terminalStateMeta = getSidebarTerminalStateMeta(workspace.id, member.agentName);
         const row = document.createElement("div");
         const rowTheme = getAgentTheme(member.agentName);
         row.className = `session-agent-row ${workspace.id === state.workspaceId && state.selectedAgent === member.agentName && state.activeTab === "terminal" ? "active" : ""}`;
         row.dataset.agentTheme = rowTheme.key;
         row.setAttribute("style", buildAgentThemeStyle(member.agentName));
         row.innerHTML = `
-          <div class="status-dot ${agent?.status ?? "idle"}"></div>
+          <div class="status-dot ${terminalStateMeta.dotStatus}"></div>
           <button type="button" class="session-agent-main" data-session-terminal="${workspace.id}" data-agent-name="${member.agentName}">
             <div class="session-agent-head">
-              <div class="session-agent-name">${escHtml(member.agentName)}</div>
-              <span class="session-agent-chip">${member.isParent ? "parent" : escHtml(agent?.type ?? "agent")}</span>
+              <div class="session-agent-name" title="${escHtml(member.agentName)}">${escHtml(member.agentName)}</div>
             </div>
-            <div class="session-agent-meta">${member.isParent ? "parent agent" : `${agent?.type ?? "agent"} · ${agent?.model || "model 未設定"}`}</div>
+            <div class="session-agent-meta">
+              <span class="session-agent-chip">${member.isParent ? "parent" : escHtml(agent?.type ?? "agent")}</span>
+              <span class="session-agent-status-badge ${terminalStateMeta.badgeClass}">${terminalStateMeta.label}</span>
+              <span class="session-agent-meta-text">${member.isParent ? "parent agent" : `${agent?.type ?? "agent"} · ${agent?.model || "model 未設定"}`}</span>
+            </div>
           </button>
           <div class="session-agent-actions">
+            ${terminalStateMeta.canStart ? `<button type="button" class="session-action-btn session-agent-start-btn" data-agent-start="${member.agentName}" data-start-workspace="${workspace.id}" title="CLI を起動">Start</button>` : ""}
             <button type="button" class="session-action-btn" data-agent-settings="${member.agentName}" data-settings-workspace="${workspace.id}" title="agent 設定">⚙</button>
             ${member.isParent ? "" : `<button type="button" class="session-action-btn" data-agent-remove="${member.agentName}" data-remove-workspace="${workspace.id}" title="child agent を外す">－</button>`}
           </div>
@@ -1978,11 +3177,9 @@ async function saveWorkspaceLayout(items) {
   }
   await res.json().catch(() => null);
   await loadWorkspaces();
-  void triggerActiveWorkspaceBootstrap({ force: true });
 }
 
 async function openWorkspaceChat(workspaceId) {
-  ensureExpandedSession(workspaceId);
   const nextAgent = getWorkspaceParentAgentName(workspaceId) || state.selectedAgent;
   const switched = workspaceId === state.workspaceId
     ? true
@@ -1996,19 +3193,38 @@ async function openWorkspaceChat(workspaceId) {
 }
 
 async function openAgentTerminal(workspaceId, agentName) {
-  ensureExpandedSession(workspaceId);
   const switched = workspaceId === state.workspaceId
     ? true
     : await activateWorkspace(workspaceId, { preferredAgentName: agentName });
   if (!switched) return;
   selectAgent(agentName);
+  await loadWorkspaceTerminalStates(workspaceId);
+  const snapshot = getWorkspaceTerminalStateSnapshot(workspaceId, agentName);
   if (terminal.agentName !== agentName || terminal.workspaceId !== workspaceId) {
     resetTerminalView();
   }
   switchTab("terminal");
   renderSessionSidebar();
   requestAnimationFrame(() => {
-    connectTerminal(agentName);
+    if (snapshot.hasProcess) {
+      connectTerminal(agentName);
+    } else {
+      initXterm();
+      if (terminal.xterm) {
+        terminal.xterm.reset();
+        terminal.xterm.clearSelection?.();
+      }
+      if (terminalFallbackEl) {
+        terminalFallbackEl.textContent = "";
+      }
+      terminal.agentName = agentName;
+      terminal.workspaceId = workspaceId;
+      setTerminalConnectionState("disconnected");
+      setTerminalRuntimeState("not_started");
+      setTerminalInputEnabled(false);
+      renderTerminalHeader();
+      scheduleTerminalFit();
+    }
     scheduleTerminalFit();
   });
 }
@@ -2021,6 +3237,19 @@ function openSessionCreate() {
   sessionCreateWorkdirEl.value = "";
   switchTab("settings");
   renderSettingsScope();
+}
+
+function prepareSettingsScopeForTabOpen() {
+  const activeWorkspace = getWorkspaceById(state.workspaceId);
+  if (activeWorkspace) {
+    state.settingsScope = "session";
+    state.settingsWorkspaceId = activeWorkspace.id;
+  } else {
+    state.settingsScope = "global";
+    state.settingsWorkspaceId = null;
+  }
+  state.settingsAgentName = null;
+  populateAgentSelect(sessionCreateParentAgentEl);
 }
 
 async function openSessionSettings(workspaceId) {
@@ -2114,10 +3343,6 @@ function selectAgent(name) {
 
   updateChatComposerState();
   renderTerminalHeader();
-
-  if (isTerminalTabActive() && hasWorkspaceSelection()) {
-    requestAnimationFrame(() => connectTerminal(name));
-  }
 }
 
 // ── Chat rendering ─────────────────────────────────────────────────────────
@@ -2559,19 +3784,26 @@ function removeTyping(agentName, workspaceId) {
 
 function resolveChatTarget(rawPrompt) {
   const prompt = String(rawPrompt || "").trim();
-  const workspaceMembers = getWorkspaceAgents(state.workspaceId).map((entry) => entry.agentName);
-  const prefixedMatch = prompt.match(/^([a-zA-Z0-9_-]+)\?\s*([\s\S]+)$/);
-  if (prefixedMatch) {
-    const targetAgent = prefixedMatch[1].toLowerCase();
-    if (!workspaceMembers.includes(targetAgent)) {
-      throw new Error(`agent "${targetAgent}" はこの session に追加されていません。`);
-    }
+  const workspaceMembers = getWorkspaceAgents(state.workspaceId)
+    .map((entry) => String(entry.agentName || "").trim().toLowerCase())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length || a.localeCompare(b));
+  const genericPrefixedMatch = prompt.match(/^(\S+)\?\s*([\s\S]*)$/);
+  const prefixedAgent = workspaceMembers.find((agentName) =>
+    prompt.toLowerCase().startsWith(`${agentName}?`)
+  );
+  if (prefixedAgent) {
+    const routedPrompt = prompt.slice(prefixedAgent.length + 1).trim();
     return {
-      agentName: targetAgent,
-      prompt: prefixedMatch[2].trim(),
-      displayPrompt: prefixedMatch[2].trim(),
-      inputMode: isSlashCommandInput(prefixedMatch[2]) ? "slash_command" : "prompt",
+      agentName: prefixedAgent,
+      prompt: routedPrompt,
+      displayPrompt: routedPrompt,
+      inputMode: isSlashCommandInput(routedPrompt) ? "slash_command" : "prompt",
     };
+  }
+  if (genericPrefixedMatch) {
+    const targetAgent = genericPrefixedMatch[1].toLowerCase();
+    throw new Error(`agent "${targetAgent}" はこの session に追加されていません。`);
   }
   const parentAgent = getWorkspaceParentAgentName(state.workspaceId);
   if (!parentAgent) {
@@ -2622,6 +3854,7 @@ async function sendMessage() {
 
     chatInputEl.value = "";
     chatInputEl.style.height = "";
+    void loadWorkspaceTerminalStates(workspaceId, { force: true });
     scheduleMessageCatchup(workspaceId, agentName, baselineAgentMessageCount);
   } catch (e) {
     showToast(`❌ ネットワークエラー: ${e.message}`, "error");
@@ -2655,6 +3888,28 @@ async function loadWorkspaces() {
       state.chatLogs.delete(workspaceId);
     }
   }
+  for (const workspaceId of [...state.expandedSessions]) {
+    if (!validWorkspaceIds.has(workspaceId)) {
+      state.expandedSessions.delete(workspaceId);
+    }
+  }
+  for (const workspaceKey of [...state.workspaceTerminalStates.keys()]) {
+    const separatorIndex = workspaceKey.indexOf(":");
+    const workspaceId = separatorIndex >= 0 ? workspaceKey.slice(0, separatorIndex) : workspaceKey;
+    if (!validWorkspaceIds.has(workspaceId)) {
+      state.workspaceTerminalStates.delete(workspaceKey);
+    }
+  }
+  for (const workspaceId of [...state.workspaceTerminalStateLoaded]) {
+    if (!validWorkspaceIds.has(workspaceId)) {
+      state.workspaceTerminalStateLoaded.delete(workspaceId);
+    }
+  }
+  for (const workspaceId of [...state.workspaceTerminalStatePending]) {
+    if (!validWorkspaceIds.has(workspaceId)) {
+      state.workspaceTerminalStatePending.delete(workspaceId);
+    }
+  }
 
   workspaceSelectEl.innerHTML = "";
   for (const ws of workspaces) {
@@ -2665,9 +3920,6 @@ async function loadWorkspaces() {
       opt.selected = true;
     }
     workspaceSelectEl.appendChild(opt);
-    if (ws.id === nextWorkspaceId || state.expandedSessions.size === 0) {
-      ensureExpandedSession(ws.id);
-    }
   }
   state.workspaceId = nextWorkspaceId;
   if (nextWorkspaceId && workspaceSelectEl.value !== nextWorkspaceId) {
@@ -2702,9 +3954,6 @@ async function loadWorkspaces() {
   } else if (!nextWorkspaceId) {
     renderChatLog(null);
   }
-  if (state.bootReady) {
-    void triggerActiveWorkspaceBootstrap();
-  }
 }
 
 async function loadWorkspaceAgents(workspaceId) {
@@ -2720,50 +3969,72 @@ async function loadAllWorkspaceAgents() {
   await Promise.all(state.workspaces.map((workspace) => loadWorkspaceAgents(workspace.id)));
 }
 
-async function prewarmWorkspaceAgent(workspaceId, agentName) {
+async function loadWorkspaceTerminalStates(workspaceId, { force = false } = {}) {
+  if (!workspaceId) return;
+  if (!force && (state.workspaceTerminalStateLoaded.has(workspaceId) || state.workspaceTerminalStatePending.has(workspaceId))) {
+    return;
+  }
+  state.workspaceTerminalStatePending.add(workspaceId);
   try {
-    await fetch(`/api/agents/${encodeURIComponent(agentName)}/prewarm`, {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/terminal-states`);
+    if (!res.ok) {
+      throw new Error("terminal states の取得に失敗しました");
+    }
+    const snapshots = await res.json();
+    for (const snapshot of snapshots) {
+      if (snapshot?.agentName) {
+        setWorkspaceTerminalState(workspaceId, snapshot.agentName, snapshot);
+      }
+    }
+    const members = getWorkspaceAgents(workspaceId);
+    for (const member of members) {
+      if (!state.workspaceTerminalStates.has(getWorkspaceTerminalStateKey(workspaceId, member.agentName))) {
+        setWorkspaceTerminalState(workspaceId, member.agentName, {});
+      }
+    }
+    state.workspaceTerminalStateLoaded.add(workspaceId);
+    if (state.workspaceId === workspaceId || state.expandedSessions.has(workspaceId)) {
+      renderSessionSidebar();
+    }
+  } catch (error) {
+    console.warn("[multiCLI] failed to load workspace terminal states", workspaceId, error);
+  } finally {
+    state.workspaceTerminalStatePending.delete(workspaceId);
+  }
+}
+
+async function startWorkspaceAgentCli(workspaceId, agentName, { silent = false } = {}) {
+  if (!workspaceId || !agentName) return false;
+  setWorkspaceTerminalState(workspaceId, agentName, { status: "starting", hasProcess: true, readyForPrompt: false });
+  renderSessionSidebar();
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/prewarm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ workspaceId, waitForReadyMs: 4000 }),
     });
-  } catch {}
-}
-
-async function triggerActiveWorkspaceBootstrap({ force = false } = {}) {
-  if (!state.bootReady) return;
-  const signature = getSidebarActiveWorkspaces()
-    .map((workspace) => `${workspace.id}:${getWorkspaceAgents(workspace.id).map((entry) => entry.agentName).join(",")}`)
-    .join("|");
-  if (!signature) {
-    state.activeBootstrapSignature = "";
-    return;
-  }
-  if (!force && signature === state.activeBootstrapSignature) {
-    return;
-  }
-  if (state.activeBootstrapPromise) {
-    state.pendingActiveBootstrapSignature = signature;
-    return;
-  }
-  state.activeBootstrapSignature = signature;
-  state.activeBootstrapPromise = (async () => {
-    for (const workspace of getSidebarActiveWorkspaces()) {
-      const members = getWorkspaceAgents(workspace.id);
-      for (const member of members) {
-        await prewarmWorkspaceAgent(workspace.id, member.agentName);
-      }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "CLI 起動に失敗しました" }));
+      throw new Error(err.error || "CLI 起動に失敗しました");
     }
-  })().finally(() => {
-    state.activeBootstrapPromise = null;
-    if (
-      state.pendingActiveBootstrapSignature &&
-      state.pendingActiveBootstrapSignature !== state.activeBootstrapSignature
-    ) {
-      state.pendingActiveBootstrapSignature = "";
-      void triggerActiveWorkspaceBootstrap({ force: true });
+    await loadWorkspaceTerminalStates(workspaceId, { force: true });
+    if (!silent) {
+      showToast(`✅ ${agentName} を起動しました`, "success");
     }
-  });
+    return true;
+  } catch (error) {
+    setWorkspaceTerminalState(workspaceId, agentName, {
+      status: "error",
+      hasProcess: false,
+      readyForPrompt: false,
+      warningMessage: error.message,
+    });
+    renderSessionSidebar();
+    if (!silent) {
+      showToast(`❌ ${error.message}`, "error");
+    }
+    return false;
+  }
 }
 
 async function activateWorkspace(wsId, { preferredAgentName = state.selectedAgent } = {}) {
@@ -2777,7 +4048,6 @@ async function activateWorkspace(wsId, { preferredAgentName = state.selectedAgen
   if (workspaceSelectEl.value !== wsId) {
     workspaceSelectEl.value = wsId;
   }
-  ensureExpandedSession(wsId);
   renderTerminalHeader();
   renderChatRouteHint();
   await loadAgents();
@@ -2879,6 +4149,14 @@ sessionSidebarEl?.addEventListener("click", (event) => {
     );
     return;
   }
+  const startAgent = event.target.closest("[data-agent-start]");
+  if (startAgent) {
+    void startWorkspaceAgentCli(
+      startAgent.getAttribute("data-start-workspace"),
+      startAgent.getAttribute("data-agent-start"),
+    );
+    return;
+  }
   const agentSettings = event.target.closest("[data-agent-settings]");
   if (agentSettings) {
     void openAgentSettings(
@@ -2914,6 +4192,29 @@ sessionSidebarEl?.addEventListener("click", (event) => {
       removeChild.getAttribute("data-remove-workspace"),
       removeChild.getAttribute("data-agent-remove"),
     );
+  }
+});
+
+sessionSidebarEl?.addEventListener("dragover", (event) => {
+  if (!state.sidebarDrag) return;
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "move";
+  }
+  applySidebarDropDestination(resolveSidebarDropDestination(event));
+});
+
+sessionSidebarEl?.addEventListener("drop", (event) => {
+  if (!state.sidebarDrag) return;
+  event.preventDefault();
+  commitSidebarDrop(resolveSidebarDropDestination(event));
+});
+
+sessionSidebarEl?.addEventListener("dragleave", (event) => {
+  if (!state.sidebarDrag) return;
+  const nextTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+  if (!nextTarget || !sessionSidebarEl.contains(nextTarget)) {
+    clearSidebarDropIndicators();
   }
 });
 
@@ -2964,10 +4265,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const tab = btn.dataset.tab;
     if (tab === "settings") {
-      state.settingsScope = "global";
-      state.settingsWorkspaceId = null;
-      state.settingsAgentName = null;
-      populateAgentSelect(sessionCreateParentAgentEl);
+      prepareSettingsScopeForTabOpen();
     }
     switchTab(tab);
     if (tab === "chat") {
@@ -3055,6 +4353,7 @@ const TERMINAL_SESSION_LIMIT = 12;
 const TERMINAL_LOCAL_COMPLETION_DELAY_MS = 400;
 const TERMINAL_STATUS_TEXT = {
   disconnected: "disconnected",
+  not_started: "not started",
   starting: "starting",
   ready: "ready",
   running: "running",
@@ -3217,6 +4516,7 @@ const terminal = {
   connectionState: "disconnected",
   runtimeState: "disconnected",
   lastRuntimeState: "disconnected",
+  hasProcess: false,
   searchVisible: false,
   suppressNextCloseNotice: false,
   markers: [],
@@ -3968,6 +5268,7 @@ function autoResizeTerminalInput() {
 
 function getTerminalBadgeState() {
   if (!terminal.agentName) return "disconnected";
+  if (!terminal.hasProcess && terminal.runtimeState === "not_started") return "not_started";
   if (terminal.connectionState === "error") return "error";
   if (terminal.connectionState === "connecting") return "starting";
   if (terminal.connectionState !== "open") return "disconnected";
@@ -3992,7 +5293,7 @@ function renderTerminalHeader() {
   const workspaceId = terminal.workspaceId ?? state.workspaceId ?? null;
   const workspace = getWorkspaceById(workspaceId);
   const badgeState = getTerminalBadgeState();
-  const canInteract = terminal.connectionState === "open";
+  const canInteract = terminal.connectionState === "open" && terminal.hasProcess;
   const hasSelection = terminal.xterm?.hasSelection?.() ?? false;
   const hasBuffer = Boolean(terminal.plainBuffer.trim());
   const themeAgent = terminal.agentName || state.selectedAgent || getWorkspaceParentAgentName(workspaceId);
@@ -4035,7 +5336,11 @@ function renderTerminalHeader() {
   }
   if (terminalSharedHintEl) {
     terminalSharedHintEl.textContent = terminal.agentName
-      ? `shared PTY key: ${workspaceId}:${terminal.agentName} · Chat / Discord / Schedule と同じ stdin/stdout`
+      ? (
+        terminal.hasProcess
+          ? `shared PTY key: ${workspaceId}:${terminal.agentName} · Chat / Discord / Schedule と同じ stdin/stdout`
+          : `shared PTY key: ${workspaceId}:${terminal.agentName} · 未起動。Start ボタンか送信で起動`
+      )
       : hasWorkspaceSelection(workspaceId)
         ? "Chat / Discord / Schedule と同じ PTY stdin/stdout を共有"
         : "workspace がないため terminal は未接続です";
@@ -4062,8 +5367,8 @@ function renderTerminalHeader() {
     terminalStatusBadgeEl.textContent = TERMINAL_STATUS_TEXT[badgeState] ?? badgeState;
   }
 
-  btnTerminalReconnectEl.disabled = !terminal.agentName;
-  btnTerminalKill.disabled = !terminal.agentName;
+  btnTerminalReconnectEl.disabled = !terminal.agentName || !terminal.hasProcess;
+  btnTerminalKill.disabled = !terminal.agentName || !terminal.hasProcess;
   btnTerminalLayoutSideEl.disabled = !layoutEnabled || !terminal.agentName;
   btnTerminalLayoutBottomEl.disabled = !layoutEnabled || !terminal.agentName;
   btnTerminalClearEl.disabled = !clearEnabled || (!hasBuffer && !terminal.xterm);
@@ -4091,6 +5396,15 @@ function setTerminalRuntimeState(nextState) {
 }
 
 function syncTerminalStatusFromAgent(agentName, status) {
+  if (state.workspaceId && agentName) {
+    const currentSnapshot = getWorkspaceTerminalStateSnapshot(state.workspaceId, agentName);
+    setWorkspaceTerminalState(state.workspaceId, agentName, {
+      ...currentSnapshot,
+      status,
+      hasProcess: status === "idle" ? currentSnapshot.hasProcess : true,
+      readyForPrompt: status === "idle",
+    });
+  }
   if (terminal.agentName !== agentName || terminal.workspaceId !== state.workspaceId) return;
   if (status === "idle") {
     if (terminal.connectionState === "open") {
@@ -4173,6 +5487,7 @@ function resetTerminalView() {
   terminal.warningMessage = "";
   terminal.approvalRequest = null;
   terminal.quotaNotice = null;
+  terminal.hasProcess = false;
   terminalShellEl?.classList.remove("fallback-active");
   if (terminalFallbackEl) {
     terminalFallbackEl.hidden = true;
@@ -4239,6 +5554,8 @@ async function sendTerminalRaw(text) {
 function shouldUseTerminalPromptPipeline(text) {
   const normalized = String(text ?? "").trim();
   if (!normalized || !terminal.agentName) return false;
+  const snapshot = getWorkspaceTerminalStateSnapshot(terminal.workspaceId ?? state.workspaceId, terminal.agentName);
+  if (!snapshot.hasProcess) return true;
   if (terminal.draftInputBuffer.trim()) return false;
   return getTerminalBadgeState() === "ready";
 }
@@ -4270,6 +5587,7 @@ async function sendTerminalPrompt(text) {
       return false;
     }
     terminal.remoteTurnPromptSummary = summarizeTerminalMarkerText(text, `${agentName} prompt`);
+    void loadWorkspaceTerminalStates(workspaceId, { force: true });
     setTerminalRuntimeState("running");
     return true;
   } catch (error) {
@@ -4541,6 +5859,7 @@ async function refreshTerminalState() {
     terminal.warningMessage = "";
     terminal.approvalRequest = null;
     terminal.quotaNotice = null;
+    terminal.hasProcess = false;
     setTerminalRuntimeState("disconnected");
     return;
   }
@@ -4550,9 +5869,11 @@ async function refreshTerminalState() {
     );
     if (!res.ok) return;
     const snapshot = await res.json();
+    setWorkspaceTerminalState(terminal.workspaceId, terminal.agentName, snapshot);
     terminal.approvalRequest = snapshot.approvalRequest || null;
     terminal.quotaNotice = snapshot.quotaNotice || null;
     terminal.warningMessage = snapshot.warningMessage || "";
+    terminal.hasProcess = Boolean(snapshot.hasProcess);
     const heuristics = getTerminalHeuristics();
     const bufferedText = terminal.plainBuffer;
     const bufferLooksReady = Boolean(
@@ -4577,10 +5898,13 @@ async function refreshTerminalState() {
     if (!snapshot.hasProcess) {
       terminal.configWarning = "";
       terminal.approvalRequest = null;
-      setTerminalRuntimeState(terminal.connectionState === "open" ? "starting" : "disconnected");
+      setTerminalInputEnabled(false);
+      setTerminalRuntimeState("not_started");
+      renderSessionSidebar();
       return;
     }
     terminal.configWarning = snapshot.configStale ? (snapshot.configWarning || "") : "";
+    setTerminalInputEnabled(true);
     setTerminalRuntimeState(snapshot.readyForPrompt ? "ready" : "starting");
     if (
       bufferedText &&
@@ -4592,6 +5916,7 @@ async function refreshTerminalState() {
     ) {
       setTerminalRuntimeState("ready");
     }
+    renderSessionSidebar();
   } catch {}
 }
 
@@ -4760,6 +6085,31 @@ function connectTerminal(agentName, { force = false } = {}) {
     scheduleTerminalFit();
     focusTerminalPrimaryInput();
     return;
+  }
+
+  if (!force && state.workspaceTerminalStateLoaded.has(workspaceId)) {
+    const snapshot = getWorkspaceTerminalStateSnapshot(workspaceId, agentName);
+    if (!snapshot.hasProcess) {
+      resetTerminalView();
+      initXterm();
+      if (terminal.xterm) {
+        terminal.xterm.reset();
+        terminal.xterm.clearSelection?.();
+      }
+      if (terminalFallbackEl) {
+        terminalFallbackEl.textContent = "";
+      }
+      terminal.agentName = agentName;
+      terminal.workspaceId = workspaceId;
+      terminal.hasProcess = false;
+      rememberTerminalSession(agentName, workspaceId);
+      setTerminalConnectionState("disconnected");
+      setTerminalRuntimeState("not_started");
+      setTerminalInputEnabled(false);
+      renderTerminalHeader();
+      scheduleTerminalFit();
+      return;
+    }
   }
 
   if (terminal.ws) {
@@ -5105,6 +6455,7 @@ async function loadSessionSettings(workspaceId) {
       sessionMemoryInputEl.value = payload?.content ?? "";
     }
   } catch {}
+  await refreshSessionInspector(workspaceId);
 }
 
 async function loadAgentSettings(agentName) {
@@ -5351,6 +6702,502 @@ btnSaveSessionMemoryEl?.addEventListener("click", async () => {
   showToast("✅ workspace memory を保存しました", "success");
 });
 
+btnSessionDurabilityRefreshEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  await refreshSessionInspector(workspaceId);
+  showToast("✅ workspace inspector を更新しました", "success");
+});
+
+sessionResumeBindingsEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-session-resume-agent]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const agentName = button.dataset.sessionResumeAgent?.trim();
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!agentName || !workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ resume に失敗: ${err.error ?? res.status}`, "error");
+      return;
+    }
+    await refreshSessionInspector(workspaceId);
+    showToast(`✅ ${agentName} を resume しました`, "success");
+  } catch {
+    showToast("❌ resume に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+btnSessionCheckpointCreateEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/checkpoints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      label: sessionCheckpointLabelEl?.value?.trim() || "",
+      requestedBy: "UI settings",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(`❌ checkpoint 作成に失敗: ${err.error ?? res.status}`, "error");
+    return;
+  }
+  if (sessionCheckpointLabelEl) sessionCheckpointLabelEl.value = "";
+  await loadSessionGitSafety(workspaceId);
+  await loadSessionDurability(workspaceId);
+  showToast("✅ checkpoint を作成しました", "success");
+});
+
+sessionCheckpointsEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-checkpoint-preview]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const checkpointId = button.dataset.checkpointPreview?.trim();
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!checkpointId || !workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/rollback/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ checkpointId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ rollback preview に失敗: ${err.error ?? res.status}`, "error");
+      return;
+    }
+    renderSessionRollbackPreview(await res.json());
+    showToast("✅ rollback preview を更新しました", "success");
+  } catch {
+    showToast("❌ rollback preview に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+sessionRollbackPreviewEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("#btn-session-rollback-apply")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const checkpointId = state.settingsRollbackPreview?.checkpoint?.id;
+  if (!workspaceId || !checkpointId) return;
+  if (!confirm(`checkpoint "${checkpointId}" へ rollback を適用しますか？`)) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/rollback/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        checkpointId,
+        approved: true,
+        requestedBy: "UI settings",
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ rollback apply に失敗: ${err.error ?? res.status}`, "error");
+      return;
+    }
+    renderSessionRollbackPreview(await res.json());
+    await refreshSessionInspector(workspaceId);
+    showToast("✅ rollback を適用しました", "success");
+  } catch {
+    showToast("❌ rollback apply に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+btnSessionClaimEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const agentName = sessionClaimAgentEl?.value?.trim() || "";
+  const task = sessionClaimTaskEl?.value?.trim() || "";
+  if (!agentName || !task) {
+    showToast("❌ claim には agent と task が必要です", "error");
+    return;
+  }
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/tasks/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agentName,
+      task,
+      requestedBy: "UI settings",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(`❌ claim に失敗: ${err.error ?? res.status}`, "error");
+    return;
+  }
+  if (sessionClaimTaskEl) sessionClaimTaskEl.value = "";
+  await loadSessionCoordination(workspaceId);
+  await loadSessionDurability(workspaceId);
+  showToast(`✅ ${agentName} が claim しました`, "success");
+});
+
+btnSessionHandoffEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const fromAgentName = sessionHandoffFromEl?.value?.trim() || "";
+  const toAgentName = sessionHandoffToEl?.value?.trim() || "";
+  const task = sessionHandoffTaskEl?.value?.trim() || "";
+  if (!fromAgentName || !toAgentName || !task) {
+    showToast("❌ handoff には from / to / task が必要です", "error");
+    return;
+  }
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/handoffs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fromAgentName,
+      toAgentName,
+      task,
+      requestedBy: "UI settings",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showToast(`❌ handoff に失敗: ${err.error ?? res.status}`, "error");
+    return;
+  }
+  if (sessionHandoffTaskEl) sessionHandoffTaskEl.value = "";
+  await loadSessionCoordination(workspaceId);
+  await loadSessionDurability(workspaceId);
+  showToast(`✅ ${fromAgentName} → ${toAgentName} handoff を追加しました`, "success");
+});
+
+btnSessionProfileSaveEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/profile`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: sessionProfileModeEl?.value || "standard",
+      persona: sessionProfilePersonaEl?.value || "balanced",
+      autonomy: sessionProfileAutonomyEl?.value || "guided",
+      notes: sessionProfileNotesEl?.value || "",
+    }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showToast(`❌ workspace profile 保存に失敗: ${payload.error ?? res.status}`, "error");
+    return;
+  }
+  applySessionProfile(payload);
+  showToast("✅ workspace profile を保存しました", "success");
+});
+
+sessionClaimsPanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-claim-release-agent]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const agentName = button.dataset.claimReleaseAgent?.trim();
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!agentName || !workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/tasks/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentName,
+        requestedBy: "UI settings",
+        reason: "manual",
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`❌ release に失敗: ${err.error ?? res.status}`, "error");
+      return;
+    }
+    await loadSessionCoordination(workspaceId);
+    await loadSessionDurability(workspaceId);
+    showToast(`✅ ${agentName} を release しました`, "success");
+  } catch {
+    showToast("❌ release に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+btnSessionReviewRefreshEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  await Promise.all([
+    loadSessionReview(workspaceId),
+    loadSessionAutomation(workspaceId),
+  ]);
+  showToast("✅ review / automation を更新しました", "success");
+});
+
+btnSessionAutomationRefreshEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  await loadSessionAutomation(workspaceId);
+  showToast("✅ automation を更新しました", "success");
+});
+
+sessionReviewChangesEl?.addEventListener("click", (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-review-open-path]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  void openChatFileViewer(button.dataset.reviewOpenPath || "");
+});
+
+sessionWorktreePanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("#btn-session-worktree-ensure")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/worktree`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedBy: "UI settings" }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(`❌ worktree 作成に失敗: ${payload.error ?? res.status}`, "error");
+      return;
+    }
+    await loadWorkspaces();
+    if (payload?.workspace?.workdir && sessionWorkdirInputEl) {
+      sessionWorkdirInputEl.value = payload.workspace.workdir;
+    }
+    renderSessionWorktreePanel(payload?.status || null);
+    await loadSessionReview(workspaceId);
+    showToast("✅ isolated worktree へ切り替えました", "success");
+  } catch {
+    showToast("❌ worktree 作成に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+btnSessionLockClaimEl?.addEventListener("click", async () => {
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  if (!workspaceId) return;
+  const agentName = sessionLockAgentEl?.value?.trim() || "";
+  const filePath = sessionLockFileEl?.value?.trim() || "";
+  const symbol = sessionLockSymbolEl?.value?.trim() || "";
+  if (!agentName || !filePath || !symbol) {
+    showToast("❌ lock には agent / file / symbol が必要です", "error");
+    return;
+  }
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/locks/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agentName,
+      filePath,
+      symbol,
+      requestedBy: "UI settings",
+    }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    renderSessionLockConflict(payload);
+    showToast(`❌ semantic lock に失敗: ${payload.error ?? res.status}`, res.status === 409 ? "warning" : "error");
+    return;
+  }
+  if (sessionLockFileEl) sessionLockFileEl.value = "";
+  if (sessionLockSymbolEl) sessionLockSymbolEl.value = "";
+  renderSessionLockConflict(null);
+  renderSessionLocksPanel(payload?.locks || []);
+  setInlineHint(sessionReviewHintEl, `dirty=${state.settingsReviewSnapshot?.repository?.status?.dirtyCount ?? 0} / locks=${Array.isArray(payload?.locks) ? payload.locks.length : 0} / isolated=${state.settingsWorktreeStatus?.isIsolated ? "yes" : "no"}`);
+  showToast("✅ semantic lock を追加しました", "success");
+});
+
+sessionLocksPanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-lock-release-id]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const lockId = button.dataset.lockReleaseId?.trim() || "";
+  if (!workspaceId || !lockId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/locks/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        lockId,
+        requestedBy: "UI settings",
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(`❌ semantic lock release に失敗: ${payload.error ?? res.status}`, "error");
+      return;
+    }
+    renderSessionLocksPanel(payload?.locks || []);
+    showToast("✅ semantic lock を release しました", "success");
+  } catch {
+    showToast("❌ semantic lock release に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+sessionMemoryAutomationPanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-memory-preview-scope]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const scope = button.dataset.memoryPreviewScope?.trim() || "";
+  if (!workspaceId || !scope) return;
+  const endpoint =
+    scope === "consolidation"
+      ? "consolidation"
+      : scope === "diary"
+        ? "diary"
+        : "dreaming";
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/memory/${endpoint}/preview`);
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showToast(`❌ ${scope} preview に失敗: ${payload.error ?? res.status}`, "error");
+    return;
+  }
+  renderSessionMemoryAutomationPreview(payload);
+  showToast(`✅ ${scope} preview を更新しました`, "success");
+});
+
+sessionMemoryAutomationPreviewEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("#btn-session-memory-automation-apply")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const preview = state.settingsMemoryAutomationPreview;
+  if (!workspaceId || !preview?.scope) return;
+  if (!confirm(`${preview.scope} を apply しますか？`)) return;
+  const endpoint =
+    preview.scope === "workspace"
+      ? "consolidation"
+      : preview.scope === "diary"
+        ? "diary"
+        : "dreaming";
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/memory/${endpoint}/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approved: true,
+        requestedBy: "UI settings",
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(`❌ ${preview.scope} apply に失敗: ${payload.error ?? res.status}`, "error");
+      return;
+    }
+    renderSessionMemoryAutomationPreview(payload);
+    if (payload.scope === "workspace" || payload.scope === "dreaming") {
+      await loadSessionSettings(workspaceId);
+    }
+    showToast(`✅ ${preview.scope} を apply しました`, "success");
+  } catch {
+    showToast("❌ automation apply に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+sessionSkillsPanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-skill-sync-action]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const action = button.dataset.skillSyncAction?.trim() || "plan";
+  if (!workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/skills/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: action === "apply",
+        requestedBy: "UI settings",
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(`❌ skill ${action} に失敗: ${payload.error ?? res.status}`, "error");
+      return;
+    }
+    const registryRes = await fetch("/api/skills/registry");
+    const registry = registryRes.ok ? await registryRes.json() : null;
+    renderSessionSkillsPanel(registry, payload);
+    showToast(`✅ skill ${action} を更新しました`, "success");
+  } catch {
+    showToast("❌ skill sync に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
+sessionMcpPanelEl?.addEventListener("click", async (event) => {
+  const button = event.target instanceof Element
+    ? event.target.closest("[data-mcp-sync-action]")
+    : null;
+  if (!(button instanceof HTMLElement)) return;
+  const workspaceId = state.settingsWorkspaceId || state.workspaceId;
+  const action = button.dataset.mcpSyncAction?.trim() || "plan";
+  if (!workspaceId) return;
+  button.setAttribute("disabled", "disabled");
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/mcp/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: action === "apply",
+        requestedBy: "UI settings",
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(`❌ MCP ${action} に失敗: ${payload.error ?? res.status}`, "error");
+      return;
+    }
+    const registryRes = await fetch("/api/mcp/registry");
+    const registry = registryRes.ok ? await registryRes.json() : null;
+    renderSessionMcpPanel(registry, payload);
+    showToast(`✅ MCP ${action} を更新しました`, "success");
+  } catch {
+    showToast("❌ MCP sync に失敗しました", "error");
+  } finally {
+    button.removeAttribute("disabled");
+  }
+});
+
 btnSessionDeleteEl?.addEventListener("click", async () => {
   const workspaceId = state.settingsWorkspaceId || state.workspaceId;
   const workspace = getWorkspaceById(workspaceId);
@@ -5555,7 +7402,6 @@ async function boot() {
   configureAgentCreateControls(agentsCreateTypeEl?.value || "gemini", runtimeInfo);
 
   connectSSE();
-  void triggerActiveWorkspaceBootstrap({ force: true });
 
   // Poll agent statuses every 5s
   setInterval(loadAgents, 5000);

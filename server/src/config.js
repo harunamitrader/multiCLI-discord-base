@@ -477,6 +477,8 @@ export function loadConfig() {
   const scheduleDefaultsPath = path.join(dataDir, "schedule-defaults.json");
   const skillRegistryPath = path.join(projectRoot, "server", "skills", "registry.yaml");
   const skillSourceDir = path.join(projectRoot, "server", "skills");
+  const mcpRegistryPath = path.join(projectRoot, "server", "mcp", "registry.json");
+  const mcpSourceDir = path.join(projectRoot, "server", "mcp");
   const availableModels = loadAvailableModels();
   const cliSettings = loadCliSettingsConfig(cliSettingsPath, availableModels);
   const appSettings = loadAppSettingsConfig(appSettingsPath);
@@ -538,6 +540,8 @@ export function loadConfig() {
     scheduleDefaultsPath,
     skillRegistryPath,
     skillSourceDir,
+    mcpRegistryPath,
+    mcpSourceDir,
     databasePath: path.join(dataDir, "bridge.sqlite"),
     runtimeStatePath: path.join(dataDir, "state.json"),
     uiDir,

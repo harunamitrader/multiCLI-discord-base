@@ -43,7 +43,19 @@ function summarizeMessages(messages = [], limit = 8) {
       const text = normalizeText(message.content).split("\n").map((line) => line.trim()).filter(Boolean)[0] || "(empty)";
       return `- ${author}: ${text.slice(0, 160)}`;
     })
-    .join("\n");
+     .join("\n");
+}
+
+function stripNamedSection(content, heading) {
+  const normalizedHeading = String(heading ?? "").trim();
+  if (!normalizedHeading) return normalizeText(content);
+  const source = normalizeText(content);
+  if (!source) return "";
+  const escapedHeading = normalizedHeading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return source
+    .replace(new RegExp(`\\n## ${escapedHeading}[\\s\\S]*$`, "u"), "")
+    .replace(new RegExp(`^## ${escapedHeading}[\\s\\S]*$`, "u"), "")
+    .trim();
 }
 
 export class MemoryAutomationService {
@@ -77,6 +89,11 @@ export class MemoryAutomationService {
         name: `ai-diary-${workspace.name}`,
         active: false,
         description: "recent runs から AI diary を生成する提案ジョブ",
+      },
+      {
+        name: `dreaming-${workspace.name}`,
+        active: false,
+        description: "workspace memory を整理して次の着手候補を提案する提案ジョブ",
       },
     ];
   }
@@ -174,6 +191,63 @@ export class MemoryAutomationService {
     fs.writeFileSync(preview.diaryPath, normalizeText(preview.proposedContent), "utf8");
     return {
       ...preview,
+      applied: true,
+    };
+  }
+
+  previewWorkspaceDreaming(workspaceId) {
+    const workspace = this._getWorkspace(workspaceId);
+    const memory = this.memoryService.getWorkspaceMemory(workspaceId);
+    const recentMessages = this.store.listWorkspaceMessages(workspaceId, 20);
+    const stableMemory = stripNamedSection(memory.content, "Dreaming candidates");
+    const candidateLines = recentMessages
+      .slice(-10)
+      .map((message) => {
+        const author =
+          message.role === "user"
+            ? "User"
+            : message.agentName || "Assistant";
+        const firstLine = normalizeText(String(message.content ?? "").split("\n")[0]);
+        if (!firstLine) return "";
+        return `- ${author}: ${firstLine.slice(0, 180)}`;
+      })
+      .filter(Boolean);
+    const proposedContent = [
+      stableMemory,
+      "## Dreaming candidates",
+      `- Workspace: ${workspace.name}`,
+      ...(candidateLines.length > 0 ? candidateLines : ["- (recent activity not found)"]),
+    ].filter(Boolean).join("\n\n").trim();
+    const backupPath = path.join(
+      this.config.memoryAutomationDir,
+      "backups",
+      `${workspaceId}-dreaming-${this._timestampLabel()}.md`,
+    );
+    return {
+      scope: "dreaming",
+      workspaceId,
+      workspaceName: workspace.name,
+      path: memory.path,
+      backupPath,
+      currentContent: memory.content,
+      proposedContent,
+      diff: buildLineDiff(memory.content, proposedContent),
+      tokenEstimate: Math.ceil(proposedContent.length / 4),
+      suggestedJobs: this.listSuggestedJobs(workspaceId),
+    };
+  }
+
+  applyWorkspaceDreaming(workspaceId, { approved = false } = {}) {
+    if (!approved) {
+      throw new Error("Dreaming 実行には explicit approval が必要です。");
+    }
+    const preview = this.previewWorkspaceDreaming(workspaceId);
+    ensureDir(preview.backupPath);
+    fs.writeFileSync(preview.backupPath, normalizeText(preview.currentContent), "utf8");
+    const saved = this.memoryService.setWorkspaceMemory(workspaceId, preview.proposedContent);
+    return {
+      ...preview,
+      saved,
       applied: true,
     };
   }

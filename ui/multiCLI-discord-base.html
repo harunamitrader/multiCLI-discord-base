@@ -236,6 +236,120 @@
                 <textarea id="session-memory-input" class="settings-input settings-textarea" rows="8" placeholder="この workspace 専用の固定メモ"></textarea>
                 <button id="btn-save-session-memory" class="btn-settings-save">workspace memory を保存</button>
               </div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Durability / resume</h4>
+                <button id="btn-session-durability-refresh" type="button" class="btn-outline">再読込</button>
+              </div>
+              <p id="session-durability-hint" class="settings-hint">saved session ref / last run state / operation audit を表示します。</p>
+              <div id="session-resume-bindings" class="settings-inspector-panel"></div>
+              <div id="session-operation-audits" class="settings-inspector-panel"></div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Git safety</h4>
+              </div>
+              <p class="settings-hint">checkpoint 作成、rollback preview、明示 apply を workspace settings から実行します。</p>
+              <div class="settings-form two-col">
+                <label>checkpoint label</label>
+                <div class="settings-inline-row">
+                  <input id="session-checkpoint-label" type="text" class="settings-input" placeholder="例: before-wave3" />
+                  <button id="btn-session-checkpoint-create" type="button" class="btn-settings-save">checkpoint 作成</button>
+                </div>
+              </div>
+              <div id="session-checkpoints" class="settings-inspector-panel"></div>
+              <div id="session-rollback-preview" class="settings-inspector-panel"></div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Task coordination</h4>
+              </div>
+              <p id="session-coordination-hint" class="settings-hint">current owner / task / active claims / handoff queue を表示します。</p>
+              <div id="session-coordination-summary" class="settings-inspector-panel"></div>
+              <div class="settings-form two-col">
+                <label>assign claim</label>
+                <div class="settings-inline-row settings-inline-row-wrap">
+                  <select id="session-claim-agent" class="settings-input"></select>
+                  <input id="session-claim-task" type="text" class="settings-input" placeholder="例: rollback preview を確認する" />
+                  <button id="btn-session-claim" type="button" class="btn-settings-save">claim</button>
+                </div>
+                <label>handoff</label>
+                <div class="settings-inline-row settings-inline-row-wrap">
+                  <select id="session-handoff-from" class="settings-input"></select>
+                  <select id="session-handoff-to" class="settings-input"></select>
+                  <input id="session-handoff-task" type="text" class="settings-input" placeholder="例: Discord 通知文を確認する" />
+                  <button id="btn-session-handoff" type="button" class="btn-settings-save">handoff</button>
+                </div>
+              </div>
+              <div id="session-claims-panel" class="settings-inspector-panel"></div>
+              <div id="session-handoffs-panel" class="settings-inspector-panel"></div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Workspace profile</h4>
+              </div>
+              <p id="session-profile-hint" class="settings-hint">mode / persona / autonomy を prompt prelude に反映します。</p>
+              <div class="settings-form two-col">
+                <label>mode</label>
+                <select id="session-profile-mode" class="settings-input">
+                  <option value="standard">standard</option>
+                  <option value="research">research</option>
+                  <option value="execution">execution</option>
+                  <option value="review">review</option>
+                </select>
+                <label>persona</label>
+                <select id="session-profile-persona" class="settings-input">
+                  <option value="balanced">balanced</option>
+                  <option value="careful">careful</option>
+                  <option value="assertive">assertive</option>
+                  <option value="mentor">mentor</option>
+                </select>
+                <label>autonomy</label>
+                <select id="session-profile-autonomy" class="settings-input">
+                  <option value="guided">guided</option>
+                  <option value="semi">semi</option>
+                  <option value="high">high</option>
+                </select>
+                <label>notes</label>
+                <textarea id="session-profile-notes" class="settings-input settings-textarea" rows="3" placeholder="例: review 時は risk を先に出す"></textarea>
+              </div>
+              <div class="settings-actions">
+                <button id="btn-session-profile-save" type="button" class="btn-settings-save">profile を保存</button>
+              </div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Review / isolation</h4>
+                <button id="btn-session-review-refresh" type="button" class="btn-outline">再読込</button>
+              </div>
+              <p id="session-review-hint" class="settings-hint">Git diff preview / isolated worktree / semantic locks を表示します。</p>
+              <div id="session-review-summary" class="settings-inspector-panel"></div>
+              <div id="session-review-changes" class="settings-inspector-panel"></div>
+              <div id="session-worktree-panel" class="settings-inspector-panel"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Semantic locks</h4>
+              </div>
+              <div class="settings-form two-col">
+                <label>lock symbol</label>
+                <div class="settings-inline-row settings-inline-row-wrap">
+                  <select id="session-lock-agent" class="settings-input"></select>
+                  <input id="session-lock-file" type="text" class="settings-input" placeholder="例: server\src\http-server.js" />
+                  <input id="session-lock-symbol" type="text" class="settings-input" placeholder="例: createHttpServer" />
+                  <button id="btn-session-lock-claim" type="button" class="btn-settings-save">lock</button>
+                </div>
+              </div>
+              <div id="session-lock-conflict" class="settings-inspector-panel"></div>
+              <div id="session-locks-panel" class="settings-inspector-panel"></div>
+              <div class="settings-section-divider"></div>
+              <div class="settings-header-row settings-subsection-header">
+                <h4 class="settings-subtitle">Automation / extensions</h4>
+                <button id="btn-session-automation-refresh" type="button" class="btn-outline">再読込</button>
+              </div>
+              <p id="session-automation-hint" class="settings-hint">drift / memory automation / skills / MCP を表示します。</p>
+              <div id="session-extension-dashboard-panel" class="settings-inspector-panel"></div>
+              <div id="session-task-board-panel" class="settings-inspector-panel"></div>
+              <div id="session-validation-panel" class="settings-inspector-panel"></div>
+              <div id="session-drift-panel" class="settings-inspector-panel"></div>
+              <div id="session-memory-automation-panel" class="settings-inspector-panel"></div>
+              <div id="session-memory-automation-preview" class="settings-inspector-panel"></div>
+              <div id="session-skills-panel" class="settings-inspector-panel"></div>
+              <div id="session-mcp-panel" class="settings-inspector-panel"></div>
             </section>
 
             <section id="agent-settings-section" class="settings-section" hidden>

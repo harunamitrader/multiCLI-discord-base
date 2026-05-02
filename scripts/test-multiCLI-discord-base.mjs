@@ -131,6 +131,14 @@ const agents = ["hanako", "taro", "jiro"];
   ok("hanako? (no prompt) → agent=hanako, prompt=''", r?.agent === "hanako" && r?.prompt === "");
 }
 {
+  const r = parseAgentCommand("gemini2.5? hello", [...agents, "gemini2.5"]);
+  ok("gemini2.5? <prompt> → dotted agent name supported", r?.agent === "gemini2.5" && r?.prompt === "hello");
+}
+{
+  const r = parseAgentCommand("copilot.dev? /model", [...agents, "copilot.dev"]);
+  ok("copilot.dev? /model → dotted copilot agent supported", r?.agent === "copilot.dev" && r?.prompt === "/model");
+}
+{
   const r = parseAgentCommand("hanako stop!", agents);
   ok("hanako stop! → verb=stop", r?.agent === "hanako" && r?.verb === "stop");
 }
@@ -219,7 +227,7 @@ const store = new Store(db);
   ok("createWorkspace → id exists", !!ws?.id);
   ok("createWorkspace → name=test-ws", ws?.name === "test-ws");
   ok("createWorkspace → contextInjectionEnabled=false", ws?.contextInjectionEnabled === false);
-  ok("createWorkspace → first workspace is sidebar-active", ws?.isSidebarActive === true);
+  ok("createWorkspace → workspace remains sidebar-visible", ws?.isSidebarActive === true);
   ok("createWorkspace → first workspace sortOrder=0", ws?.sortOrder === 0);
 
   const got = store.getWorkspaceByName("test-ws");

@@ -29,6 +29,8 @@ import { stripAnsi } from "./ansi-strip.js";
 const COMPLETION_SILENCE_MS = 25_000;
 /** extra retry window when Codex has not emitted a response yet */
 const CODEX_EMPTY_COMPLETION_RETRY_MS = 10_000;
+/** Claude can print its final bullet noticeably after the prompt line reappears */
+const CLAUDE_EMPTY_COMPLETION_RETRY_MS = 12_000;
 /** Hard timeout per run (5 min) */
 const HARD_TIMEOUT_MS = 5 * 60 * 1000;
 /** Max ms to wait for CLI to show its ready prompt on first spawn */
@@ -126,6 +128,14 @@ function getReadyReturnCompletionDelay(agentType, promptText = "") {
   return READY_RETURN_COMPLETION_MS;
 }
 
+function getEmptyCompletionRetryDelay(agentType) {
+  return agentType === "claude" ? CLAUDE_EMPTY_COMPLETION_RETRY_MS : CODEX_EMPTY_COMPLETION_RETRY_MS;
+}
+
+function getEmptyCompletionRetryLimit(agentType) {
+  return agentType === "claude" ? 10 : 3;
+}
+
 function parsePromptCodeFence(promptText = "") {
   const matches = [...String(promptText ?? "").matchAll(/```([A-Za-z0-9._+-]*)\n([\s\S]*?)```/g)];
   if (matches.length !== 1) return null;
@@ -184,10 +194,31 @@ function extractExactReplyTarget(promptText = "") {
     /^Reply exactly this line:\n([\s\S]+)$/i,
     /^Reply with exactly these lines:\n([\s\S]+)$/i,
     /^Reply with exactly these two lines:\n([\s\S]+)$/i,
+    /^Return exactly this line:\n([\s\S]+)$/i,
+    /^Return with exactly these lines:\n([\s\S]+)$/i,
+    /^Return with exactly these two lines:\n([\s\S]+)$/i,
+    /^Return this URL exactly:\s*([^\n]+)$/i,
+    /^Return exactly:\s*([^\n]+)$/i,
+    /^Return exactly\s+([^\n]+)$/i,
     /^Reply only:\s*([^\n]+)$/i,
     /^Reply only\s+([^\n]+)$/i,
     /^Say only:\s*([^\n]+)$/i,
     /^Say only\s+([^\n]+)$/i,
+  ]) {
+    const match = prompt.match(pattern);
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+function extractRequestedCodeBlockTarget(promptText = "") {
+  const prompt = String(promptText ?? "").replace(/\r/g, "").trim();
+  if (!prompt) return null;
+  for (const pattern of [
+    /^Return a code block containing\s+([^\n]+)$/i,
+    /^Reply with a code block containing\s+([^\n]+)$/i,
   ]) {
     const match = prompt.match(pattern);
     if (match?.[1]) {
@@ -232,6 +263,7 @@ function recoverExactReplyFromPrompt(promptText = "", responseText = "") {
     looseNormalizedTarget &&
     looseNormalizedResponse.includes(looseNormalizedTarget) &&
     (
+      /\[\s*Thought\s*:\s*true\s*\]/i.test(response) ||
       /(?:^|\n)\s*(?:Reply|Say) only\b/im.test(response) ||
       /workspace \(\/directory\)|Type your message or @path\/to\/file|branch\b|sandbox\b|~[\\/]|^[A-Za-z]:\\/im.test(response)
     )
@@ -248,6 +280,69 @@ function exactReplyMatchesTarget(promptText = "", responseText = "") {
     normalizeExactReplyForComparison(responseText) ===
     normalizeExactReplyForComparison(target)
   );
+}
+
+function rehydrateRequestedCodeBlock(promptText = "", responseText = "") {
+  const target = extractRequestedCodeBlockTarget(promptText);
+  const response = String(responseText ?? "").trim();
+  if (!target || !response || /```/.test(response)) {
+    return response;
+  }
+
+  const normalizedTarget = normalizeExactReplyForComparison(target);
+  if (!normalizedTarget) {
+    return response;
+  }
+
+  const candidateLines = response
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => String(line ?? "").trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^(?:[-*•]|\d+(?:[.)])?)\s+/, "").trim())
+    .map((line) => normalizeExactReplyForComparison(line))
+    .filter(Boolean);
+
+  if (candidateLines.includes(normalizedTarget)) {
+    return `\`\`\`\n${target}\n\`\`\``;
+  }
+  return response;
+}
+
+function recoverMarkerReplyFromPrompt(promptText = "", responseText = "") {
+  const prompt = String(promptText ?? "").trim();
+  const response = String(responseText ?? "").trim();
+  if (!prompt || !response) {
+    return response;
+  }
+  if (!/^[A-Z0-9]+(?:_[A-Z0-9]+)+_CHECK$/u.test(prompt)) {
+    return response;
+  }
+
+  const quotedTokens = [...response.matchAll(/"([A-Z0-9]+(?:_[A-Z0-9]+)+)"/g)]
+    .map((match) => match[1])
+    .filter((token) => token && token !== prompt);
+  if (quotedTokens.length > 0) {
+    return quotedTokens.at(-1);
+  }
+
+  const thoughtTail = response.match(/\[\s*Thought\s*:\s*true\s*\]([\s\S]*)$/i)?.[1] ?? "";
+  const compactThoughtTail = thoughtTail.replace(/[^A-Z0-9_]/g, "");
+  const tailToken = compactThoughtTail.match(/[A-Z0-9]+(?:_[A-Z0-9]+)+/g)?.sort((left, right) => right.length - left.length)?.[0];
+  if (tailToken && tailToken !== prompt) {
+    return tailToken;
+  }
+
+  const tokens = [...response.matchAll(/[A-Z0-9]+(?:_[A-Z0-9]+)+/g)]
+    .map((match) => match[0])
+    .filter((token) => token && token !== prompt)
+    .sort((left, right) => right.length - left.length);
+  const longest = tokens[0] || "";
+  if (longest) {
+    return longest;
+  }
+
+  return response;
 }
 
 function recoverExactMultilineReplyFromTranscript(promptText = "", transcriptText = "") {
@@ -475,6 +570,10 @@ function buildLoosePromptPattern(promptText = "") {
     .join("[\\s\\u00A0]*");
 }
 
+function resolveTranscriptPromptText(promptText = "", metadata = null) {
+  return metadata?.inputMode === "slash_command" ? "" : promptText;
+}
+
 function transcriptContainsLoosePromptEcho(text = "", promptText = "") {
   const promptPattern = buildLoosePromptPattern(promptText);
   if (!promptPattern) {
@@ -512,10 +611,19 @@ function transcriptLooksContaminatedByPromptEcho(agentType, text = "", promptTex
   if (agentType === "gemini") {
     const hasGeminiScaffoldMarker =
       /workspace \(\/directory\)|Type your message or @path\/to\/file/i.test(transcript);
+    const stripped = stripGeminiScaffolding(transcript, promptText).trim();
+    const exactTarget = extractExactReplyTarget(promptText);
+    if (
+      hasGeminiScaffoldMarker &&
+      exactTarget &&
+      !exactReplyMatchesTarget(promptText, stripped) &&
+      transcriptContainsPromptPrefixEcho(transcript, promptText, 1)
+    ) {
+      return true;
+    }
     if (hasGeminiScaffoldMarker && transcriptContainsPromptPrefixEcho(transcript, promptText)) {
       return true;
     }
-    const stripped = stripGeminiScaffolding(transcript, promptText).trim();
     return Boolean(stripped) && transcriptContainsLoosePromptEcho(stripped, promptText);
   }
   return false;
@@ -696,7 +804,13 @@ function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
     const latestModelText = stripGeminiScaffolding(cleaned.slice(lastModelIndex + "Model:".length), promptText);
     const finalizedLatest = finalizeGeminiTranscriptText(latestModelText);
     if (finalizedLatest) {
-      return recoverExactReplyFromPrompt(promptText, finalizedLatest);
+      return rehydrateRequestedCodeBlock(
+        promptText,
+        recoverMarkerReplyFromPrompt(
+          promptText,
+          recoverExactReplyFromPrompt(promptText, finalizedLatest),
+        ),
+      );
     }
   }
 
@@ -704,9 +818,15 @@ function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
     .map((match) => finalizeGeminiTranscriptText(match[1]))
     .filter(Boolean);
   if (modelBlocks.length > 0) {
-    return recoverExactReplyFromPrompt(
+    return rehydrateRequestedCodeBlock(
       promptText,
-      compactRepeatedGeminiParagraphs([...new Set(modelBlocks)].join("\n\n")),
+      recoverMarkerReplyFromPrompt(
+        promptText,
+        recoverExactReplyFromPrompt(
+          promptText,
+          compactRepeatedGeminiParagraphs([...new Set(modelBlocks)].join("\n\n")),
+        ),
+      ),
     );
   }
 
@@ -718,7 +838,13 @@ function sanitizeGeminiTranscriptCandidate(text, promptText = "") {
   cleaned = stripGeminiScaffolding(cleaned, promptText);
   const finalized = finalizeGeminiTranscriptText(cleaned);
   if (finalized) {
-    return recoverExactReplyFromPrompt(promptText, finalized);
+    return rehydrateRequestedCodeBlock(
+      promptText,
+      recoverMarkerReplyFromPrompt(
+        promptText,
+        recoverExactReplyFromPrompt(promptText, finalized),
+      ),
+    );
   }
   const exactTarget = extractExactReplyTarget(promptText);
   if (
@@ -735,10 +861,21 @@ function sanitizeGeminiTranscript(text, promptText = "") {
   const cleaned = String(text ?? "").replace(/\u0007/g, "").replace(/\r/g, "");
   const scoped = scopeGeminiTranscriptToCurrentTurn(cleaned, promptText);
   if (scoped && scoped !== cleaned) {
-    const scopedResult = sanitizeGeminiTranscriptCandidate(scoped, promptText);
-    if (scopedResult) {
-      return scopedResult;
+    const scopedSanitized = sanitizeGeminiTranscriptCandidate(scoped, promptText);
+    if (scopedSanitized) {
+      return scopedSanitized;
     }
+    const promptMarkerIndex = cleaned.lastIndexOf("[User prompt]");
+    if (promptMarkerIndex >= 0) {
+      const prefix = cleaned.slice(0, promptMarkerIndex);
+      if (!/\bModel:\s*/.test(prefix)) {
+        const prefixSanitized = sanitizeGeminiTranscriptCandidate(prefix, promptText);
+        if (prefixSanitized) {
+          return prefixSanitized;
+        }
+      }
+    }
+    return "";
   }
   return sanitizeGeminiTranscriptCandidate(cleaned, promptText);
 }
@@ -883,9 +1020,6 @@ export function normalizePersistedAssistantText(agentType, text) {
   if (!normalizedText.trim()) {
     return "";
   }
-  if (agentType === "gemini") {
-    return recoverExactReplyFromPrompt("", finalizeGeminiTranscriptText(normalizedText));
-  }
   return normalizedText.trim();
 }
 
@@ -911,17 +1045,41 @@ function claudeLooksReadyPrompt(text) {
     .some((line) => /^(?:❯|>)\s*$/.test(line));
 }
 
+function claudeLooksReadyReturn(text, promptText = "") {
+  const lines = normalizeClaudeLines(text).slice(-24);
+  if (!lines.some((line) => /^(?:❯|>)\s*$/.test(line))) {
+    return false;
+  }
+  const promptLineSet = buildPromptLineSet(promptText, normalizeClaudeLines, /^(?:●|❯|>)\s*/);
+  return lines.some((line) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine.startsWith("●")) {
+      return false;
+    }
+    const normalized = stripClaudeTrailingArtifacts(trimmedLine.replace(/^●\s*/, ""));
+    return Boolean(normalized) && !promptLineSet.has(normalized) && !isClaudeNoiseLine(normalized, promptText);
+  });
+}
+
 function stripClaudeTrailingArtifacts(text) {
   return String(text ?? "")
     .split("\n")
     .map((line) => String(line ?? "")
+      .replace(/\s+(?:❯|>)\s*[\s\S]*$/u, "")
+      .replace(/(?:❯|>)\s*[\s\S]*?(?:リセット|reset|tokens?\b|Haiku\b|Sonnet\b|Opus\b|branch\b|weekly limit|usage limit)[\s\S]*$/iu, "")
+      .replace(/\s+You['’]?ve used[\s\S]*$/iu, "")
+      .replace(/\s+\/effort[\s\S]*$/iu, "")
+      .replace(/\s+[A-Z][A-Za-z'’-]+…\s*\([^)]*\)\s*$/u, "")
+      .replace(/\s+[A-Z][A-Za-z'’-]+…\s*\([^)]*tokens\)\s*$/u, "")
       .replace(/\s+(?:❯|>)\s*$/u, "")
       .replace(
         /\s+(?:\*\s*)?(?:Determining|Levitating|Gusting|Shimmying|Smooshing|Thinking|Thundering|Puzzling|Accomplishing|Saut[eé]ing|Beboppin['’]?|Billowing|Flibbertigibbeting|Sublimating|Working)\s*(?:\.{3}|…)\s*$/iu,
         "",
       )
       .replace(/\s+(?:\*\s*)?[A-Z][A-Za-z'’-]+(?:ing|in['’])\s*(?:\.{3}|…)\s*$/u, "")
+      .replace(/\s+\*\s*$/u, "")
       .replace(/\s+(?:❯|>)\s*$/u, "")
+      .replace(/(?:❯|>|✻|✶|✢|✳|✽)\s*$/u, "")
       .trim())
     .filter(Boolean)
     .join("\n")
@@ -993,6 +1151,25 @@ function extractClaudeResponseLines(text, promptText = "") {
   return dedupeSequentialLines(blocks.at(-1) ?? []);
 }
 
+function extractClaudeRawBulletFallback(text, promptText = "") {
+  const promptLineSet = buildPromptLineSet(promptText, normalizeClaudeLines, /^(?:●|❯|>)\s*/);
+  const matches = [...String(text ?? "").replace(/\r/g, "").matchAll(/(?:^|\n)\s*●\s*([^\n]+)/gu)];
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    const rawLine = String(matches[index]?.[1] ?? "")
+      .replace(/[─━]{10,}[\s\S]*$/u, "")
+      .replace(/\s+(?:❯|>)\s*[\s\S]*$/u, "")
+      .replace(/\s+You['’]?ve used[\s\S]*$/iu, "")
+      .replace(/\s+\/effort[\s\S]*$/iu, "")
+      .trim();
+    const normalized = stripClaudeTrailingArtifacts(rawLine);
+    if (!normalized || promptLineSet.has(normalized) || isClaudeNoiseLine(normalized, promptText)) {
+      continue;
+    }
+    return normalized;
+  }
+  return "";
+}
+
 function sanitizeClaudeTranscript(text, promptText = "") {
   const strippedText = stripPromptEcho(text, promptText);
   const lines = normalizeClaudeLines(strippedText);
@@ -1029,6 +1206,9 @@ function sanitizeClaudeTranscript(text, promptText = "") {
   }
   const cleanedResponseBlockText = stripClaudeTrailingArtifacts(responseBlockText);
   const responseBlockRehydrated = rehydrateMarkdownShapeFromPrompt(promptText, cleanedResponseBlockText);
+  if (responseBlockRehydrated && !claudeTranscriptLooksContaminated(responseBlockRehydrated)) {
+    return responseBlockRehydrated;
+  }
   if (responseBlockRehydrated && responseContainsPromptCodeLine(promptText, responseBlockText)) {
     return responseBlockRehydrated;
   }
@@ -1041,7 +1221,10 @@ function sanitizeClaudeTranscript(text, promptText = "") {
   if (preferredResult && claudeTranscriptLooksContaminated(preferredResult) && bulletResult) {
     return rehydrateMarkdownShapeFromPrompt(promptText, bulletResult);
   }
-  return rehydrateMarkdownShapeFromPrompt(promptText, preferredResult || normalizedResult || bulletResult);
+  return rehydrateMarkdownShapeFromPrompt(
+    promptText,
+    preferredResult || normalizedResult || bulletResult || extractClaudeRawBulletFallback(text, promptText),
+  );
 }
 
 function normalizeCodexLines(text) {
@@ -1077,6 +1260,12 @@ function isCodexNoiseLine(line, promptText = "") {
     /^(?:[A-Za-z]|\d|g\d|o\d|4o|wo|or|rk|ki|in|ng|wog|wng)$/i.test(normalizedLine) &&
     !/^(?:OK|Yes|No)$/i.test(normalizedLine)
   ) {
+    return true;
+  }
+  if (/^W(?:\d+|[a-z]{1,3}\d+)$/u.test(normalizedLine)) {
+    return true;
+  }
+  if (/^W\d+(?:\s+W\d+)*$/i.test(normalizedLine)) {
     return true;
   }
   if (/^[◦•■]+$/.test(normalizedLine) || /^\d+$/.test(normalizedLine)) {
@@ -1300,7 +1489,7 @@ function matchesHeuristic(heuristics, key, text, promptText = "") {
 CLI_HEURISTICS.codex.readyReTest = codexLooksStartupReady;
 CLI_HEURISTICS.codex.readyReturnReTest = codexLooksReadyReturn;
 CLI_HEURISTICS.claude.readyReTest = claudeLooksReadyPrompt;
-CLI_HEURISTICS.claude.readyReturnReTest = claudeLooksReadyPrompt;
+CLI_HEURISTICS.claude.readyReturnReTest = claudeLooksReadyReturn;
 
 function normalizeCopilotLines(text) {
   return String(text ?? "")
@@ -1406,6 +1595,7 @@ function finalizeCopilotResponseText(text) {
     .replace(/\s*shift\+tab switch mode[\s\S]*$/i, "")
     .replace(/\s*Remaining reqs\.[\s\S]*$/i, "")
     .replace(/\s*Type @ to mention files, # for issues\/PRs, \/ for commands, or \? for shortcuts[\s\S]*$/i, "")
+    .replace(/\s+\/\s*commands\s*·\s*\?\s*help[\s\S]*$/iu, "")
     .replace(/\s*(?:~\\|[A-Za-z]:\\)[^\n]*(?:GPT-\d|\[⎇ )[\s\S]*$/iu, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/[ \t]+\n/g, "\n")
@@ -1511,6 +1701,13 @@ function choosePreferredTranscript(agentType, primaryText, fallbackText, promptT
     : primary;
 }
 
+function choosePreferredTranscriptChain(agentType, promptText = "", ...candidates) {
+  return candidates.reduce(
+    (best, candidate) => choosePreferredTranscript(agentType, best, candidate, promptText),
+    "",
+  );
+}
+
 function usesScrollbackTranscriptFallback(agentType) {
   return ["claude", "codex", "gemini"].includes(agentType);
 }
@@ -1571,6 +1768,55 @@ function stripPromptEcho(text, promptText = "") {
     stripped = stripped.replace(new RegExp(loosePromptPattern, "gu"), " ");
   }
   return stripped;
+}
+
+function trimTrailingTerminalPromptLines(text = "") {
+  const lines = String(text ?? "").replace(/\r/g, "").split("\n");
+  while (lines.length > 0) {
+    const lastLine = String(lines.at(-1) ?? "").trim();
+    if (!lastLine) {
+      lines.pop();
+      continue;
+    }
+    if (
+      /^(?:❯|>)\s*$/u.test(lastLine) ||
+      /^Type your message or @path\/to\/file/i.test(lastLine) ||
+      /^\(Press Esc to close\)$/i.test(lastLine) ||
+      /^Select Model$/i.test(lastLine)
+    ) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n").trim();
+}
+
+function extractPostPromptTranscript(text, promptText = "") {
+  const plain = stripAnsi(text ?? "").replace(/\r/g, "");
+  if (!plain.trim()) return "";
+  const normalizedPrompt = normalizeSessionPromptText(promptText);
+  if (!normalizedPrompt) {
+    return trimTrailingTerminalPromptLines(plain);
+  }
+  const markers = [
+    `[User prompt]\n${normalizedPrompt}`,
+    normalizedPrompt,
+  ];
+  let sliced = plain;
+  let sliceIndex = -1;
+  for (const marker of markers) {
+    const index = plain.lastIndexOf(marker);
+    if (index >= 0) {
+      sliceIndex = Math.max(sliceIndex, index + marker.length);
+    }
+  }
+  if (sliceIndex >= 0) {
+    sliced = plain.slice(sliceIndex);
+  } else {
+    sliced = stripPromptEcho(plain, normalizedPrompt);
+  }
+  return trimTrailingTerminalPromptLines(sliced.replace(/^\s+/u, ""));
 }
 
 function getGeminiConfigPaths() {
@@ -3123,6 +3369,7 @@ export class PtyService {
     state.codexExactCompletionRetries = 0;
     state._completedByReadyReturn = false;
     state.streamedText = "";
+    state.liveResponseHint = "";
     state.quotaNotice = null;
     state.lastObserverNoticeKey = "";
     this._clearApprovalRequest(key, { emit: false });
@@ -3575,6 +3822,9 @@ export class PtyService {
   _syncSessionRefNow(key, reason = "unknown") {
     const state = this._states.get(key);
     if (!state) return null;
+    if (!this._ptys.has(key)) {
+      return state.sessionRef || null;
+    }
     const agent = this.agentRegistry.get(state.agentName);
     if (!agent) return state.sessionRef;
     const knownSessionRefs =
@@ -3862,8 +4112,14 @@ export class PtyService {
       state.rawBuffer = `${state.rawBuffer}${rawData}`.slice(-131072);
       const plain = stripAnsi(rawData);
       const fullPlain = stripAnsi(state.rawBuffer);
-      const authSafePlain = stripPromptEcho(plain, state.promptText);
-      const authSafeFullPlain = stripPromptEcho(fullPlain, state.promptText);
+      const transcriptPromptText = resolveTranscriptPromptText(state.promptText, state.manualTurnMetadata);
+      const agentType = agent?.type ?? "codex";
+      const transcriptQualityPromptText =
+        state.manualTurnMetadata?.inputMode === "slash_command" && agentType === "gemini"
+          ? state.promptText
+          : transcriptPromptText;
+      const authSafePlain = stripPromptEcho(plain, transcriptPromptText);
+      const authSafeFullPlain = stripPromptEcho(fullPlain, transcriptPromptText);
       if (h.authRequiredRe?.test(authSafePlain)) {
         state.authRequired = true;
         state.status = "waiting_input";
@@ -3938,26 +4194,50 @@ export class PtyService {
       if (h.stillRunningRe.test(authSafePlain) || /(?:^|\n)\s*●\s+/u.test(fullPlain)) {
         state.turnActivitySeen = true;
       }
-      const agentType = agent?.type ?? "codex";
       const transcriptSoFar = this._getStreamingTranscript(key, state, agentType);
-      const transcriptContaminated = transcriptLooksContaminatedByPromptEcho(
+      const exactTargetRecovered =
+        agentType === "gemini" &&
+        exactReplyMatchesTarget(transcriptPromptText, transcriptSoFar);
+      const fullTranscriptContaminated = transcriptLooksContaminatedByPromptEcho(
         agentType,
-        transcriptSoFar,
-        state.promptText,
+        fullPlain,
+        transcriptQualityPromptText,
       );
-      const transcriptMeaningful = transcriptLooksMeaningfulForCompletion(
-        agentType,
-        transcriptSoFar,
-        state.promptText,
-      );
-      const strippedSoFar = stripPromptEcho(fullPlain, state.promptText);
+      const transcriptContaminated =
+        transcriptLooksContaminatedByPromptEcho(
+          agentType,
+          transcriptSoFar,
+          transcriptQualityPromptText,
+        ) ||
+        (fullTranscriptContaminated && !exactTargetRecovered);
+      const transcriptMeaningful =
+        !transcriptContaminated &&
+        transcriptLooksMeaningfulForCompletion(
+          agentType,
+          transcriptSoFar,
+          transcriptQualityPromptText,
+        );
+      const geminiResponseSeen =
+        agentType === "gemini" &&
+        /(?:^|\n)\s*Model:\s*\S+/u.test(authSafeFullPlain);
+      if (geminiResponseSeen) {
+        state.turnActivitySeen = true;
+      }
+      const strippedSoFar = stripPromptEcho(fullPlain, transcriptQualityPromptText);
+      const readyReturnMatched =
+        matchesHeuristic(h, "readyReturnRe", plain, transcriptPromptText) ||
+        matchesHeuristic(h, "readyReturnRe", strippedSoFar, transcriptPromptText);
+      const geminiShortReadyReturn =
+        agentType === "gemini" &&
+        geminiResponseSeen &&
+        transcriptMeaningful &&
+        readyReturnMatched;
       if (
         state.turnActivitySeen &&
         transcriptMeaningful &&
-        strippedSoFar.length > READY_RETURN_MIN_CHARS &&
         (
-          matchesHeuristic(h, "readyReturnRe", plain, state.promptText) ||
-          matchesHeuristic(h, "readyReturnRe", strippedSoFar, state.promptText)
+          geminiShortReadyReturn ||
+          (strippedSoFar.length > READY_RETURN_MIN_CHARS && readyReturnMatched)
         )
       ) {
         state._completedByReadyReturn = true;
@@ -3994,6 +4274,17 @@ export class PtyService {
     }
 
     state.rawBuffer += rawData;
+    if (agent?.type === "claude") {
+      const liveResponseHint = extractClaudeRawBulletFallback(plain, state.promptText);
+      if (liveResponseHint) {
+        state.liveResponseHint = choosePreferredTranscript(
+          "claude",
+          state.liveResponseHint ?? "",
+          liveResponseHint,
+          state.promptText,
+        );
+      }
+    }
     if (h.quotaRe?.test(authSafePlain) || h.quotaRe?.test(authSafeFullPlain)) {
       this._setQuotaWaitState(key, `${authSafeFullPlain}\n${authSafePlain}`);
       this._completeRun(key, "quota_wait");
@@ -4183,10 +4474,18 @@ export class PtyService {
 
     const agent = this.agentRegistry.get(state.agentName);
     const agentType = agent?.type ?? "codex";
-    let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
+    let text = recoverExactReplyFromPrompt(
+      state.promptText,
+      extractPostPromptTranscript(state.rawBuffer, state.promptText),
+    );
     if (usesScrollbackTranscriptFallback(agentType)) {
-      const fallbackText = sanitizeTranscript(agentType, this._getRunScrollback(key, state), state.promptText);
-      text = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
+      const fallbackText = recoverExactReplyFromPrompt(
+        state.promptText,
+        extractPostPromptTranscript(this._getRunScrollback(key, state), state.promptText),
+      );
+      if (!text && fallbackText) {
+        text = fallbackText;
+      }
     }
     const blockedStatus = state.status === "waiting_input" ? "waiting_input" : "manual_running";
 
@@ -4239,17 +4538,41 @@ export class PtyService {
   _getRunScrollback(key, state) {
     const scrollback = stripAnsi(this._scrollback.get(key) ?? "");
     const snapshot = state?.scrollbackSnapshot ?? "";
+    if (!snapshot) {
+      return scrollback;
+    }
     if (snapshot && scrollback.startsWith(snapshot)) {
       return scrollback.slice(snapshot.length);
     }
-    return scrollback;
+    const maxOverlap = Math.min(snapshot.length, scrollback.length, 8192);
+    for (let size = maxOverlap; size > 0; size -= 1) {
+      if (snapshot.slice(-size) === scrollback.slice(0, size)) {
+        return scrollback.slice(size);
+      }
+    }
+    const anchor = snapshot.slice(-Math.min(snapshot.length, 4096));
+    const anchorIndex = anchor ? scrollback.indexOf(anchor) : -1;
+    if (anchorIndex >= 0) {
+      return scrollback.slice(anchorIndex + anchor.length);
+    }
+    return "";
   }
 
   _getStreamingTranscript(key, state, agentType) {
-    let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
+    const transcriptPromptText = resolveTranscriptPromptText(state.promptText, state.manualTurnMetadata);
+    let text = recoverExactReplyFromPrompt(
+      transcriptPromptText,
+      extractPostPromptTranscript(state.rawBuffer, transcriptPromptText),
+    );
     if (usesScrollbackTranscriptFallback(agentType)) {
-      const fallbackText = sanitizeTranscript(agentType, this._getRunScrollback(key, state), state.promptText);
-      text = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
+      const runScrollback = this._getRunScrollback(key, state);
+      const fallbackText = recoverExactReplyFromPrompt(
+        transcriptPromptText,
+        extractPostPromptTranscript(runScrollback, transcriptPromptText),
+      );
+      if (!text && fallbackText) {
+        text = fallbackText;
+      }
     }
     return text;
   }
@@ -4296,16 +4619,19 @@ export class PtyService {
     // Strip ANSI from full accumulated buffer (cross-chunk accuracy)
     const agent = this.agentRegistry.get(state.agentName);
     const agentType = agent?.type ?? "codex";
-    let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
-    let fallbackText = "";
-    if (usesScrollbackTranscriptFallback(agentType)) {
-      const scrollbackText = this._getRunScrollback(key, state);
-      fallbackText = sanitizeTranscript(agentType, scrollbackText, state.promptText);
-      const preferredText = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
-      if (preferredText && preferredText !== text && fallbackText) {
-        console.log(`[pty] recovered richer ${agentType} response from scrollback for ${key}`);
+    let text = recoverExactReplyFromPrompt(
+      state.promptText,
+      extractPostPromptTranscript(state.rawBuffer, state.promptText),
+    );
+    if (!text && usesScrollbackTranscriptFallback(agentType)) {
+      const fallbackText = recoverExactReplyFromPrompt(
+        state.promptText,
+        extractPostPromptTranscript(this._getRunScrollback(key, state), state.promptText),
+      );
+      if (fallbackText) {
+        console.log(`[pty] recovered post-prompt transcript from scrollback for ${key}`);
+        text = fallbackText;
       }
-      text = preferredText;
     }
     const exactTarget = extractExactReplyTarget(state.promptText);
     if (
@@ -4328,7 +4654,7 @@ export class PtyService {
     state.codexExactCompletionRetries = 0;
     if (finalStatus === "completed" && ["codex", "claude"].includes(agentType) && !text) {
       state.codexEmptyCompletionRetries = (state.codexEmptyCompletionRetries ?? 0) + 1;
-      if (state.codexEmptyCompletionRetries >= 3) {
+      if (state.codexEmptyCompletionRetries >= getEmptyCompletionRetryLimit(agentType)) {
         text =
           agentType === "claude"
             ? "Claude の応答を抽出できませんでした。Terminal の出力を確認してください。"
@@ -4338,7 +4664,7 @@ export class PtyService {
       } else {
         clearTimeout(state.completionTimer);
         state._completedByReadyReturn = false;
-        state.completionTimer = setTimeout(() => this._tryComplete(key), CODEX_EMPTY_COMPLETION_RETRY_MS);
+        state.completionTimer = setTimeout(() => this._tryComplete(key), getEmptyCompletionRetryDelay(agentType));
         console.log(`[pty] delaying ${agentType} completion for ${key} — response text not captured yet`);
         return;
       }
@@ -4362,6 +4688,7 @@ export class PtyService {
     state.scrollbackSnapshot = "";
     state.turnActivitySeen = false;
     state.streamedText = "";
+    state.liveResponseHint = "";
     if (!["waiting_input", "quota_wait"].includes(resolvedFinalStatus)) {
       state.authRequired = false;
     }
@@ -4470,6 +4797,44 @@ export class PtyService {
     state.manualTurnMetadata = null;
   }
 
+  _resetKilledRuntimeState(key) {
+    const state = this._states.get(key);
+    if (!state) {
+      this._scrollback.set(key, "");
+      return;
+    }
+    this._clearTimers(key);
+    state.ptyPid = null;
+    state.status = "idle";
+    state.runId = null;
+    state.sessionRef = null;
+    state.sessionDiscoverySnapshot = new Set();
+    state.readyForPrompt = false;
+    state.authRequired = false;
+    state.idleRawBuffer = "";
+    state.rawBuffer = "";
+    state.promptText = "";
+    state.turnActivitySeen = false;
+    state.scrollbackSnapshot = "";
+    state.manualTurnPersist = false;
+    state.streamedText = "";
+    state.liveResponseHint = "";
+    state.quotaNotice = null;
+    state.lastObserverNoticeKey = "";
+    state.codexEmptyCompletionRetries = 0;
+    state.codexExactCompletionRetries = 0;
+    state.codexUpdatePromptDismissals = 0;
+    state._completedByReadyReturn = false;
+    state.spawnedAt = null;
+    state.configStale = false;
+    state.configWarning = "";
+    this._clearRuntimeWarning(state);
+    this._clearApprovalRequest(key, { emit: false });
+    this._resetManualInputState(state);
+    this._resetManualTurnMetadata(state);
+    this._scrollback.set(key, "");
+  }
+
   _buildManualTurnPayload(key, finalStatus) {
     const state = this._states.get(key);
     if (!state?.manualTurnPersist) return null;
@@ -4478,16 +4843,21 @@ export class PtyService {
 
     const agent = this.agentRegistry.get(state.agentName);
     const agentType = agent?.type ?? "codex";
-    let text = sanitizeTranscript(agentType, state.rawBuffer, state.promptText);
-    let fallbackText = "";
-    if (usesScrollbackTranscriptFallback(agentType)) {
-      fallbackText = sanitizeTranscript(agentType, this._getRunScrollback(key, state), state.promptText);
-      text = choosePreferredTranscript(agentType, text, fallbackText, state.promptText);
+    const transcriptPromptText = resolveTranscriptPromptText(state.promptText, state.manualTurnMetadata);
+    let text = recoverExactReplyFromPrompt(
+      transcriptPromptText,
+      extractPostPromptTranscript(state.rawBuffer, transcriptPromptText),
+    );
+    if (!text && usesScrollbackTranscriptFallback(agentType)) {
+      text = recoverExactReplyFromPrompt(
+        transcriptPromptText,
+        extractPostPromptTranscript(this._getRunScrollback(key, state), transcriptPromptText),
+      );
     }
     if (
-      transcriptLooksContaminatedByPromptEcho(agentType, text, state.promptText) &&
+      transcriptLooksContaminatedByPromptEcho(agentType, text, transcriptPromptText) &&
       fallbackText &&
-      !transcriptLooksContaminatedByPromptEcho(agentType, fallbackText, state.promptText)
+      !transcriptLooksContaminatedByPromptEcho(agentType, fallbackText, transcriptPromptText)
     ) {
       text = fallbackText;
     }
@@ -4592,6 +4962,10 @@ export class PtyService {
     if (state.status === "running" || state.status === "manual_running") return;
     const submittedText = String(state.manualInputBuffer ?? "").trim();
     const interactiveReply = state.status === "waiting_input";
+    const slashLikeManualInput =
+      Boolean(submittedText) &&
+      submittedText.startsWith("/") &&
+      !/[\r\n]/u.test(submittedText);
 
     this._clearTimers(key);
     state.status = "manual_running";
@@ -4604,6 +4978,12 @@ export class PtyService {
     state.turnActivitySeen = false;
     state.idleRawBuffer = "";
     state.scrollbackSnapshot = stripAnsi(this._scrollback.get(key) ?? "");
+    if (!interactiveReply && slashLikeManualInput) {
+      state.manualTurnMetadata = {
+        ...(state.manualTurnMetadata ?? {}),
+        inputMode: "slash_command",
+      };
+    }
     state.manualTurnPersist = !interactiveReply && Boolean(submittedText);
     state.quotaNotice = null;
     this._clearRuntimeWarning(state, "quota_wait");
@@ -4658,7 +5038,7 @@ export class PtyService {
 
   _killKey(key) {
     this._rejectPending(key, Object.assign(new Error("PTY killed"), { cancelled: true }));
-    this._clearApprovalRequest(key, { emit: false });
+    this._resetKilledRuntimeState(key);
     const ptyProc = this._ptys.get(key);
     if (ptyProc) try { ptyProc.kill(); } catch {}
     this._ptys.delete(key);
@@ -4696,13 +5076,11 @@ export class PtyService {
 
   _handleTerminalClient(ws, agentName, workspaceId, workdir) {
     const key = this._key(agentName, workspaceId);
-
-    // Ensure the PTY is running (Terminal tab acts as the launch trigger)
-    let ptyProc = this.ensureAgentPty(agentName, workspaceId, { workdir });
-    if (!ptyProc) {
-      ws.close(1011, "Failed to start terminal");
-      return;
+    const state = this._ensureState(key, agentName, workspaceId);
+    if (!state.workdir && workdir) {
+      state.workdir = workdir;
     }
+    let ptyProc = this._ptys.get(key) ?? null;
 
     const clients = this._clients.get(key) ?? new Set();
     clients.add(ws);
@@ -4721,7 +5099,9 @@ export class PtyService {
         try {
           const msg = JSON.parse(data);
           if (msg.type === "resize" && msg.cols && msg.rows) {
-            ptyProc.resize(Math.max(1, msg.cols), Math.max(1, msg.rows));
+            if (ptyProc) {
+              ptyProc.resize(Math.max(1, msg.cols), Math.max(1, msg.rows));
+            }
             return;
           }
         } catch {}
@@ -4755,10 +5135,14 @@ export class PtyService {
 
 export const __testHooks = {
   parseGeminiSessionListOutput,
+  claudeLooksReadyReturn,
+  sanitizeClaudeTranscript,
   sanitizeGeminiTranscript,
   sanitizeCodexTranscript,
+  sanitizeCopilotTranscript,
   codexLooksReadyReturn,
   choosePreferredTranscript,
+  choosePreferredTranscriptChain,
   stripPromptEcho,
   transcriptLooksContaminatedByPromptEcho,
   isCodexUpdateSelectionPrompt,

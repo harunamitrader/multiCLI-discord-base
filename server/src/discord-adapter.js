@@ -186,6 +186,10 @@ function formatDiscordHelpText() {
     "bindings! - workspace の resume binding 一覧を表示",
     "resume! [agent] - 保存済み session ref で resume を試行",
     "restart! [agent] - shared PTY を再起動",
+    "claims! - current owner / task / claim / handoff queue を表示",
+    "assign! <agent> <task> - agent に current task を assign",
+    "release! [agent] - agent の current claim を release",
+    "handoff! <from> <to> <task> - task handoff を queue に追加",
     "checkpoints! - checkpoint 一覧を表示",
     "checkpoints! create [label] - checkpoint を作成",
     "rollback! preview <checkpointId> - rollback preview を表示",
@@ -199,6 +203,48 @@ function formatDiscordHelpText() {
     "/command - CLI の / コマンドを shared PTY にそのまま送信",
     "<prompt> - 紐づけ済み workspace の parent agent に送信",
   ].join("\n");
+}
+
+function formatCoordinationSummary(context) {
+  const normalized = context && typeof context === "object" ? context : {};
+  const lines = [
+    `Owner: ${normalized.ownerAgentName || "none"}`,
+    `Current task: ${normalized.currentTask || "none"}`,
+    "",
+    "Claims:",
+    ...(Array.isArray(normalized.claims) && normalized.claims.length > 0
+      ? normalized.claims.map((entry) => `- ${entry.agentName} :: ${entry.task}`)
+      : ["- none"]),
+    "",
+    "Handoffs:",
+    ...(Array.isArray(normalized.handoffQueue) && normalized.handoffQueue.length > 0
+      ? normalized.handoffQueue.map((entry) => `- ${entry.fromAgentName} -> ${entry.toAgentName} :: ${entry.task}`)
+      : ["- none"]),
+  ];
+  return lines.join("\n");
+}
+
+function parseAssignBangArgs(args = "") {
+  const trimmed = String(args ?? "").trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(\S+)\s+(.+)$/u);
+  if (!match) return null;
+  return {
+    agentName: match[1],
+    task: match[2].trim(),
+  };
+}
+
+function parseHandoffBangArgs(args = "") {
+  const trimmed = String(args ?? "").trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(\S+)\s+(\S+)\s+(.+)$/u);
+  if (!match) return null;
+  return {
+    fromAgentName: match[1],
+    toAgentName: match[2],
+    task: match[3].trim(),
+  };
 }
 
 function parseLeadingBangCommand(content) {
@@ -605,6 +651,14 @@ export class DiscordAdapter {
       this.bus.on("approval.expired", (event) => {
         this.handleWorkspaceApprovalEvent("expired", event).catch((error) => {
           console.error("Discord workspace approval expiry failed:", error);
+        });
+      }),
+    );
+
+    this.unsubscribers.push(
+      this.bus.on("coordination.notice", (event) => {
+        this.handleWorkspaceCoordinationNotice(event).catch((error) => {
+          console.error("Discord workspace coordination notice failed:", error);
         });
       }),
     );
@@ -1060,6 +1114,16 @@ export class DiscordAdapter {
       await channel.send(chunk).catch(() => null);
     }
     this.markWorkspaceProgressTrackerHasTrailingMessages(workspaceId);
+  }
+
+  async handleWorkspaceCoordinationNotice(event) {
+    if (!event?.workspaceId || !event?.message) {
+      return;
+    }
+    if (String(event?.details?.source || "").trim().toLowerCase() === "discord") {
+      return;
+    }
+    await this.sendWorkspaceChannelNotice(event.workspaceId, `> ${event.message}`);
   }
 
   stopWorkspaceProgressTracker(workspaceId) {
@@ -2345,6 +2409,120 @@ export class DiscordAdapter {
         );
       } catch (err) {
         await message.reply(`⚠️ ${target.agentName}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "claims!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("claims! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const taskContext = this.agentBridge.getTaskContext?.(context.workspaceId);
+      const workspace = this.agentBridge.getWorkspace?.(context.workspaceId);
+      const text = [
+        `Workspace: ${workspace?.name || context.workspaceId}`,
+        `Workspace ID: ${context.workspaceId}`,
+        "",
+        formatCoordinationSummary(taskContext),
+      ].join("\n");
+      const chunks = splitMessage(text, 1800);
+      await message.reply(chunks[0]);
+      for (const chunk of chunks.slice(1)) {
+        await message.channel.send(chunk).catch(() => null);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "assign!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("assign! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const parsed = parseAssignBangArgs(bangCommand.args);
+      if (!parsed) {
+        await message.reply("使い方: `assign! <agent> <task>`");
+        return;
+      }
+      try {
+        const next = this.agentBridge.claimTask?.(context.workspaceId, parsed.agentName, parsed.task, {
+          requestedBy: "Discord",
+          source: "discord",
+        });
+        await message.reply(
+          `🧷 ${parsed.agentName} assigned: ${parsed.task}\nOwner: ${next?.ownerAgentName || "none"}`
+        );
+      } catch (err) {
+        await message.reply(`⚠️ assign!: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "release!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("release! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const target = await this.resolveDiscordRemoteOpTarget(message, bangCommand.args, "release!");
+      if (!target) {
+        return;
+      }
+      try {
+        const next = this.agentBridge.releaseTask?.(target.workspaceId, target.agentName, {
+          requestedBy: "Discord",
+          source: "discord",
+          reason: "manual",
+        });
+        await message.reply(
+          `🪪 ${target.agentName} を release しました。\nOwner: ${next?.ownerAgentName || "none"}`
+        );
+      } catch (err) {
+        await message.reply(`⚠️ release!: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+
+    if (bangCommand?.command === "handoff!") {
+      if (!this.agentBridge || !this.agentRegistry?.hasAgents()) {
+        await message.reply("handoff! は PTY-first workspace でのみ利用できます。");
+        return;
+      }
+      const context = this.resolveDiscordWorkspaceContext(message.channelId);
+      if (!context.binding || context.invalidBinding || !context.workspaceId) {
+        await this.replyWorkspaceBindingRequired(message, context);
+        return;
+      }
+      const parsed = parseHandoffBangArgs(bangCommand.args);
+      if (!parsed) {
+        await message.reply("使い方: `handoff! <from> <to> <task>`");
+        return;
+      }
+      try {
+        const next = this.agentBridge.handoffTask?.(
+          context.workspaceId,
+          parsed.fromAgentName,
+          parsed.toAgentName,
+          parsed.task,
+          {
+            requestedBy: "Discord",
+            source: "discord",
+          },
+        );
+        await message.reply(
+          `📮 ${parsed.fromAgentName} → ${parsed.toAgentName} handoff queued: ${parsed.task}\nQueued: ${next?.handoffQueue?.length ?? 0}`
+        );
+      } catch (err) {
+        await message.reply(`⚠️ handoff!: ${err instanceof Error ? err.message : String(err)}`);
       }
       return;
     }

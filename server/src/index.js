@@ -16,6 +16,8 @@ import { SchedulerService } from "./scheduler.js";
 import { PtyService } from "./pty-service.js";
 import { GitService } from "./git-service.js";
 import { SkillManager } from "./skill-manager.js";
+import { SemanticLockManager } from "./semantic-lock-manager.js";
+import { McpManager } from "./mcp-manager.js";
 
 const RESTART_EXIT_CODE = 42;
 
@@ -37,12 +39,16 @@ async function main() {
   let ptyService = null;
   let gitService = null;
   let skillManager = null;
+  let lockManager = null;
+  let mcpManager = null;
 
   const agentRegistry = new AgentRegistry(config);
   // PtyService must be created before AgentBridge so it can be injected
   ptyService = new PtyService({ agentRegistry, config, bus, store });
   gitService = new GitService({ store, ptyService, bus });
   skillManager = new SkillManager({ config, store, agentRegistry });
+  lockManager = new SemanticLockManager({ store, bus });
+  mcpManager = new McpManager({ config, store, agentRegistry });
   scheduler = new SchedulerService({ config, bus });
   const agentBridge = new AgentBridge({
     agentRegistry,
@@ -55,6 +61,8 @@ async function main() {
     memoryAutomationService,
     gitService,
     skillManager,
+    lockManager,
+    mcpManager,
   });
   const attachments = new AttachmentService(config);
   const bridge = new BridgeService({ store, bus, codex, config, attachments });

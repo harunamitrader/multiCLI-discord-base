@@ -158,6 +158,154 @@ function readTextFileExcerpt(filePath, { start = 1, end = 200 } = {}) {
   };
 }
 
+function buildWorkspaceExtensionOverview({ workspaceId, agentBridge, bridge, scheduler, config }) {
+  const workspace = agentBridge.getWorkspace(workspaceId);
+  if (!workspace) {
+    throw new Error("Workspace not found");
+  }
+  const runtime = bridge.getRuntimeInfo();
+  const bindings = agentBridge.listResumeBindings(workspaceId);
+  const terminalStates = agentBridge.listWorkspaceTerminalStates(workspaceId);
+  const taskContext = agentBridge.getTaskContext(workspaceId);
+  const worktree = agentBridge.getWorkspaceWorktreeStatus(workspaceId);
+  const locks = agentBridge.listWorkspaceSemanticLocks(workspaceId);
+  const review = agentBridge.getWorkspaceReview(workspaceId);
+  const schedules = scheduler?.listJobsReferencingWorkspace?.(workspaceId) ?? [];
+  const profile = agentBridge.getWorkspaceProfile(workspaceId);
+  const skillRegistry = agentBridge.getSkillRegistry();
+  const mcpRegistry = agentBridge.getMcpRegistry();
+  const staleBindings = bindings.filter((entry) => entry.stale);
+  const driftWarnings = terminalStates.filter((entry) => entry.warningCode || entry.warningMessage);
+  const parentAgent = agentBridge.getWorkspaceParentAgent(workspaceId);
+  const authMode =
+    config?.apiAuth?.token
+      ? "token"
+      : config?.apiAuth?.allowLoopback
+        ? "loopback"
+        : "disabled";
+  const checks = [
+    {
+      id: "parent-agent",
+      status: parentAgent ? "ok" : "warn",
+      summary: "Parent agent binding",
+      detail: parentAgent ? `parent=${parentAgent.agentName}` : "workspace parent agent が未設定です。",
+    },
+    {
+      id: "resume-bindings",
+      status: staleBindings.length === 0 ? "ok" : "warn",
+      summary: "Resume bindings",
+      detail: `valid=${bindings.length - staleBindings.length} / stale=${staleBindings.length}`,
+    },
+    {
+      id: "terminal-drift",
+      status: driftWarnings.length === 0 ? "ok" : "warn",
+      summary: "Terminal drift detection",
+      detail: driftWarnings.length === 0 ? "warning はありません。" : `${driftWarnings.length} agent に warning があります。`,
+    },
+    {
+      id: "sensitive-api-auth",
+      status: authMode === "token" ? "ok" : authMode === "loopback" ? "warn" : "warn",
+      summary: "Sensitive API auth boundary",
+      detail:
+        authMode === "token"
+          ? "Bearer token required"
+          : authMode === "loopback"
+            ? "loopback only"
+            : "auth boundary is disabled",
+    },
+    {
+      id: "sandbox-policy",
+      status: config?.codexBypassApprovalsAndSandbox ? "warn" : "ok",
+      summary: "Codex sandbox / approval policy",
+      detail: config?.codexBypassApprovalsAndSandbox
+        ? "bypassApprovalsAndSandbox=true"
+        : `sandbox=${config?.codexSandboxMode || "default"} / approval=${config?.codexApprovalPolicy || "default"}`,
+    },
+    {
+      id: "extensions-registry",
+      status: (skillRegistry?.skillCount ?? 0) > 0 && (mcpRegistry?.serverCount ?? 0) > 0 ? "ok" : "warn",
+      summary: "Extension registries",
+      detail: `skills=${skillRegistry?.skillCount ?? 0} / mcp=${mcpRegistry?.serverCount ?? 0}`,
+    },
+    {
+      id: "worktree-isolation",
+      status: !worktree?.isGitRepository ? "info" : worktree?.isIsolated ? "ok" : "info",
+      summary: "Workspace isolation",
+      detail: !worktree?.isGitRepository
+        ? "Git repository ではありません。"
+        : worktree?.isIsolated
+          ? `isolated=${worktree.worktreePath || worktree.currentWorkdir || "-"}`
+          : "shared repo mode",
+    },
+  ];
+  const overallStatus = checks.some((entry) => entry.status === "warn") ? "warn" : "ok";
+  return {
+    workspaceId,
+    workspaceName: workspace.name,
+    dashboard: {
+      runtime: {
+        transportMode: "pty-first",
+        appVersion: runtime?.app?.version || "",
+        codexVersion: runtime?.codexVersion || "",
+        baseWorkdir: runtime?.baseWorkdir || runtime?.workdir || "",
+        defaultProfile: runtime?.defaultProfile || "",
+      },
+      security: {
+        authMode,
+        codexSandboxMode: config?.codexSandboxMode || "",
+        codexApprovalPolicy: config?.codexApprovalPolicy || "",
+        codexBypassApprovalsAndSandbox: Boolean(config?.codexBypassApprovalsAndSandbox),
+      },
+      counts: {
+        schedules: schedules.length,
+        claims: Array.isArray(taskContext?.claims) ? taskContext.claims.length : 0,
+        handoffs: Array.isArray(taskContext?.handoffQueue) ? taskContext.handoffQueue.length : 0,
+        bindings: bindings.length,
+        staleBindings: staleBindings.length,
+        terminalWarnings: driftWarnings.length,
+        locks: locks.length,
+        changedFiles: Array.isArray(review?.changes) ? review.changes.length : 0,
+      },
+      profile,
+    },
+    board: {
+      columns: [
+        {
+          id: "claims",
+          title: "Claims",
+          items: (taskContext?.claims || []).map((entry) => ({
+            title: entry.task,
+            meta: entry.agentName,
+            detail: entry.updatedAt || entry.createdAt || "",
+          })),
+        },
+        {
+          id: "handoffs",
+          title: "Handoffs",
+          items: (taskContext?.handoffQueue || []).map((entry) => ({
+            title: entry.task,
+            meta: `${entry.fromAgentName} → ${entry.toAgentName}`,
+            detail: entry.status || entry.updatedAt || "",
+          })),
+        },
+        {
+          id: "schedules",
+          title: "Schedules",
+          items: schedules.map((entry) => ({
+            title: entry.name,
+            meta: entry.cronDescriptionJa || entry.cron,
+            detail: `${entry.lastStatus || "idle"} / next=${entry.nextRunAt || "-"}`,
+          })),
+        },
+      ],
+    },
+    validation: {
+      status: overallStatus,
+      checks,
+    },
+  };
+}
+
 export function createHttpServer({
   config,
   bridge,
@@ -808,6 +956,50 @@ export function createHttpServer({
           return;
         }
 
+        const wsProfileMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/profile$/);
+        if (wsProfileMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsProfileMatch[1]);
+          try {
+            sendJson(response, 200, agentBridge.getWorkspaceProfile(workspaceId));
+          } catch (err) {
+            sendJson(response, 404, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (wsProfileMatch && request.method === "PATCH") {
+          const workspaceId = decodeURIComponent(wsProfileMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.updateWorkspaceProfile(workspaceId, {
+              mode: body.mode,
+              persona: body.persona,
+              autonomy: body.autonomy,
+              notes: body.notes,
+            }));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsExtensionsOverviewMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/extensions\/overview$/);
+        if (wsExtensionsOverviewMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsExtensionsOverviewMatch[1]);
+          try {
+            sendJson(response, 200, buildWorkspaceExtensionOverview({
+              workspaceId,
+              agentBridge,
+              bridge,
+              scheduler,
+              config,
+            }));
+          } catch (err) {
+            sendJson(response, 404, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         const wsCheckpointMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/checkpoints$/);
         if (wsCheckpointMatch && request.method === "GET") {
           const workspaceId = decodeURIComponent(wsCheckpointMatch[1]);
@@ -880,6 +1072,97 @@ export function createHttpServer({
           return;
         }
 
+        const wsReviewMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/review$/);
+        if (wsReviewMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsReviewMatch[1]);
+          try {
+            sendJson(response, 200, agentBridge.getWorkspaceReview(workspaceId));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsWorktreeMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/worktree$/);
+        if (wsWorktreeMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsWorktreeMatch[1]);
+          try {
+            sendJson(response, 200, agentBridge.getWorkspaceWorktreeStatus(workspaceId));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (wsWorktreeMatch && request.method === "POST") {
+          if (!ensureSensitiveApiAccess(request, response, config)) return;
+          const workspaceId = decodeURIComponent(wsWorktreeMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.ensureWorkspaceWorktree(workspaceId, {
+              requestedBy: body.requestedBy?.trim() || "HTTP API",
+              source: "http",
+            }));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsLocksMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/locks$/);
+        if (wsLocksMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsLocksMatch[1]);
+          try {
+            sendJson(response, 200, agentBridge.listWorkspaceSemanticLocks(workspaceId));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsLocksClaimMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/locks\/claim$/);
+        if (wsLocksClaimMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsLocksClaimMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.claimWorkspaceSemanticLock(workspaceId, {
+              agentName: body.agentName?.trim() || "",
+              filePath: body.filePath?.trim() || "",
+              symbol: body.symbol?.trim() || "",
+              note: body.note?.trim() || "",
+              requestedBy: body.requestedBy?.trim() || "HTTP API",
+              source: "http",
+            }));
+          } catch (err) {
+            const statusCode = err?.code === "semantic_lock_conflict" ? 409 : 400;
+            sendJson(response, statusCode, {
+              error: err instanceof Error ? err.message : String(err),
+              conflicts: Array.isArray(err?.conflicts) ? err.conflicts : [],
+            });
+          }
+          return;
+        }
+
+        const wsLocksReleaseMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/locks\/release$/);
+        if (wsLocksReleaseMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsLocksReleaseMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.releaseWorkspaceSemanticLock(workspaceId, {
+              lockId: body.lockId?.trim() || "",
+              agentName: body.agentName?.trim() || "",
+              filePath: body.filePath?.trim() || "",
+              symbol: body.symbol?.trim() || "",
+              requestedBy: body.requestedBy?.trim() || "HTTP API",
+              source: "http",
+              reason: body.reason?.trim() || "manual",
+            }));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         // GET /api/workspaces/:id/messages — cross-agent workspace timeline
         const wsMsgMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/messages$/);
         if (wsMsgMatch && request.method === "GET") {
@@ -912,6 +1195,88 @@ export function createHttpServer({
             return;
           }
           sendJson(response, 200, agentBridge.listOperationAudits(workspaceId, Number(url.searchParams.get("limit")) || 50));
+          return;
+        }
+
+        const wsTasksMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/tasks$/);
+        if (wsTasksMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsTasksMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          sendJson(response, 200, agentBridge.getTaskContext(workspaceId));
+          return;
+        }
+
+        const wsTaskClaimMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/tasks\/claim$/);
+        if (wsTaskClaimMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsTaskClaimMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.claimTask(
+              workspaceId,
+              body.agentName?.trim() || "",
+              body.task?.trim() || "",
+              {
+                requestedBy: body.requestedBy?.trim() || "HTTP API",
+                source: "http",
+              },
+            ));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsTaskReleaseMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/tasks\/release$/);
+        if (wsTaskReleaseMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsTaskReleaseMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.releaseTask(
+              workspaceId,
+              body.agentName?.trim() || "",
+              {
+                requestedBy: body.requestedBy?.trim() || "HTTP API",
+                source: "http",
+                reason: body.reason?.trim() || "manual",
+              },
+            ));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsHandoffsMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/handoffs$/);
+        if (wsHandoffsMatch && request.method === "GET") {
+          const workspaceId = decodeURIComponent(wsHandoffsMatch[1]);
+          if (!agentBridge.getWorkspace(workspaceId)) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+          }
+          sendJson(response, 200, agentBridge.listWorkspaceHandoffs(workspaceId));
+          return;
+        }
+
+        if (wsHandoffsMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsHandoffsMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.handoffTask(
+              workspaceId,
+              body.fromAgentName?.trim() || "",
+              body.toAgentName?.trim() || "",
+              body.task?.trim() || "",
+              {
+                requestedBy: body.requestedBy?.trim() || "HTTP API",
+                source: "http",
+              },
+            ));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
           return;
         }
 
@@ -977,6 +1342,32 @@ export function createHttpServer({
           return;
         }
 
+        const wsDreamingPreviewMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/memory\/dreaming\/preview$/);
+        if (wsDreamingPreviewMatch && request.method === "GET") {
+          try {
+            sendJson(response, 200, agentBridge.previewWorkspaceDreaming(decodeURIComponent(wsDreamingPreviewMatch[1])));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        const wsDreamingApplyMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/memory\/dreaming\/apply$/);
+        if (wsDreamingApplyMatch && request.method === "POST") {
+          if (!ensureSensitiveApiAccess(request, response, config)) return;
+          const body = await readJsonBody(request);
+          try {
+            sendJson(response, 200, agentBridge.applyWorkspaceDreaming(decodeURIComponent(wsDreamingApplyMatch[1]), {
+              approved: Boolean(body.approved),
+              requestedBy: body.requestedBy?.trim() || "HTTP API",
+              source: "http",
+            }));
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         if (pathname === "/api/skills/registry" && request.method === "GET") {
           sendJson(response, 200, agentBridge.getSkillRegistry());
           return;
@@ -998,6 +1389,38 @@ export function createHttpServer({
                     });
                   })()
                 : agentBridge.planWorkspaceSkillSync(workspaceId, {
+                    agentName: body.agentName?.trim() || "",
+                  });
+            if (result) {
+              sendJson(response, 200, result);
+            }
+          } catch (err) {
+            sendJson(response, 400, { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
+        if (pathname === "/api/mcp/registry" && request.method === "GET") {
+          sendJson(response, 200, agentBridge.getMcpRegistry());
+          return;
+        }
+
+        const wsMcpSyncMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/mcp\/sync$/);
+        if (wsMcpSyncMatch && request.method === "POST") {
+          const workspaceId = decodeURIComponent(wsMcpSyncMatch[1]);
+          const body = await readJsonBody(request);
+          try {
+            const result =
+              body.apply
+                ? (() => {
+                    if (!ensureSensitiveApiAccess(request, response, config)) return null;
+                    return agentBridge.applyWorkspaceMcpSync(workspaceId, {
+                      agentName: body.agentName?.trim() || "",
+                      requestedBy: body.requestedBy?.trim() || "HTTP API",
+                      source: "http",
+                    });
+                  })()
+                : agentBridge.planWorkspaceMcpSync(workspaceId, {
                     agentName: body.agentName?.trim() || "",
                   });
             if (result) {

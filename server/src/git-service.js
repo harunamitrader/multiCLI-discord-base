@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -83,6 +84,73 @@ function buildRollbackBlockedReasons(runtimeStates = []) {
   return [...new Set(reasons)];
 }
 
+function worktreeSettingKey(workspaceId) {
+  return `workspace_worktree:${workspaceId}`;
+}
+
+function slugify(value) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workspace";
+}
+
+function truncateText(value, maxLength = 4000) {
+  const text = String(value ?? "").trimEnd();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}\n…`;
+}
+
+function parseWorktreeListOutput(output) {
+  const lines = String(output ?? "").replace(/\r/g, "").split("\n");
+  const entries = [];
+  let current = null;
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (!line) {
+      if (current?.worktree) {
+        entries.push(current);
+      }
+      current = null;
+      continue;
+    }
+    const separatorIndex = line.indexOf(" ");
+    const key = separatorIndex >= 0 ? line.slice(0, separatorIndex) : line;
+    const value = separatorIndex >= 0 ? line.slice(separatorIndex + 1).trim() : "";
+    if (key === "worktree") {
+      if (current?.worktree) {
+        entries.push(current);
+      }
+      current = {
+        worktree: path.normalize(value),
+        headSha: "",
+        branch: "",
+        detached: false,
+        locked: false,
+        prunable: false,
+      };
+      continue;
+    }
+    if (!current) continue;
+    if (key === "HEAD") current.headSha = value;
+    if (key === "branch") current.branch = value.replace(/^refs\/heads\//, "");
+    if (key === "detached") current.detached = true;
+    if (key === "locked") current.locked = true;
+    if (key === "prunable") current.prunable = true;
+  }
+  if (current?.worktree) {
+    entries.push(current);
+  }
+  return entries;
+}
+
+function readFilePreview(filePath, maxLines = 80) {
+  const content = fs.readFileSync(filePath, "utf8").replace(/\r/g, "");
+  return truncateText(content.split("\n").slice(0, maxLines).join("\n"), 4000);
+}
+
 export class GitService {
   constructor({ store, ptyService, bus }) {
     this.store = store;
@@ -92,7 +160,10 @@ export class GitService {
   }
 
   _emit(type, payload) {
-    this.bus?.emit?.(type, payload);
+    this.bus?.publish?.(type, {
+      type,
+      ...payload,
+    });
   }
 
   _withWorkspaceLock(workspaceId, fn) {
@@ -134,17 +205,171 @@ export class GitService {
       };
     }
     const rootDir = path.normalize(rootResult);
-    const headSha = normalizeText(runGit(rootDir, ["rev-parse", "HEAD"], { allowFailure: true })?.ok === false
-      ? ""
-      : runGit(rootDir, ["rev-parse", "HEAD"]));
+    const headResult = runGit(rootDir, ["rev-parse", "HEAD"], { allowFailure: true });
+    const headSha = normalizeText(headResult?.ok === false ? "" : headResult);
+    const branchResult = runGit(rootDir, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true });
     const statusOutput = runGit(rootDir, ["status", "--porcelain=v1", "--untracked-files=all"], { allowFailure: true });
     return {
       isGitRepository: true,
       workdir: normalizedWorkdir,
       rootDir,
       headSha,
+      branch: normalizeText(branchResult?.ok === false ? "" : branchResult),
       status: parseStatusOutput(statusOutput?.ok === false ? "" : statusOutput),
     };
+  }
+
+  listWorktrees(workdir) {
+    const repo = this.inspectRepository(workdir);
+    if (!repo.isGitRepository) {
+      return [];
+    }
+    const output = runGit(repo.rootDir, ["worktree", "list", "--porcelain"], { allowFailure: true });
+    return parseWorktreeListOutput(output?.ok === false ? "" : output);
+  }
+
+  _buildReviewChanges(rootDir, entries = []) {
+    return entries
+      .filter((entry) => entry.kind !== "ignored")
+      .slice(0, 24)
+      .map((entry) => {
+        let diffPreview = "";
+        if (entry.kind === "untracked") {
+          const absolutePath = path.resolve(rootDir, entry.path);
+          if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile()) {
+            diffPreview = `+++ ${entry.path}\n${readFilePreview(absolutePath, 60)}`;
+          }
+        } else {
+          const diffOutput = runGit(
+            rootDir,
+            ["diff", "--no-ext-diff", "--minimal", "--unified=3", "HEAD", "--", entry.path],
+            { allowFailure: true },
+          );
+          diffPreview = truncateText(diffOutput?.ok === false ? diffOutput.message : diffOutput, 4000);
+        }
+        return {
+          ...entry,
+          diffPreview,
+        };
+      });
+  }
+
+  getWorkspaceReview({ workspaceId, workdir }) {
+    const workspace = this.store.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const repo = this.inspectRepository(workdir);
+    const worktrees = repo.isGitRepository ? this.listWorktrees(repo.rootDir) : [];
+    const changes = repo.isGitRepository ? this._buildReviewChanges(repo.rootDir, repo.status.entries) : [];
+    return {
+      workspaceId,
+      workspaceName: workspace.name,
+      repository: repo,
+      worktrees,
+      changes,
+      truncated: (repo.status?.entries?.length || 0) > changes.length,
+    };
+  }
+
+  getWorkspaceWorktreeStatus({ workspaceId, workdir }) {
+    const workspace = this.store.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+    }
+    const repo = this.inspectRepository(workdir);
+    const metadata = this.store.getJsonAppSetting(worktreeSettingKey(workspaceId), null);
+    const worktrees = repo.isGitRepository ? this.listWorktrees(repo.rootDir) : [];
+    const currentWorkdir = path.resolve(workdir || repo.rootDir || "");
+    const storedWorktreePath = normalizeText(metadata?.worktreePath);
+    return {
+      workspaceId,
+      workspaceName: workspace.name,
+      isGitRepository: repo.isGitRepository,
+      currentWorkdir,
+      worktreePath: storedWorktreePath,
+      repoRoot: repo.rootDir || "",
+      headSha: repo.headSha || "",
+      branch: repo.branch || "",
+      metadata,
+      worktrees,
+      isIsolated: Boolean(storedWorktreePath) && path.resolve(storedWorktreePath) === currentWorkdir,
+      suggestedWorktreePath:
+        repo.isGitRepository
+          ? path.join(
+              path.dirname(repo.rootDir),
+              ".multicli-worktrees",
+              path.basename(repo.rootDir),
+              `${slugify(workspace.name)}-${workspaceId.slice(0, 8)}`,
+            )
+          : "",
+    };
+  }
+
+  ensureWorkspaceWorktree({ workspaceId, workdir, requestedBy = "system", source = "ui" }) {
+    return this._withWorkspaceLock(workspaceId, () => {
+      const workspace = this.store.getWorkspace(workspaceId);
+      if (!workspace) {
+        throw new Error(`workspace "${workspaceId}" が見つかりません。`);
+      }
+      const status = this.getWorkspaceWorktreeStatus({ workspaceId, workdir });
+      if (!status.isGitRepository) {
+        throw new Error("Git repository が見つかりません。");
+      }
+      if (status.isIsolated) {
+        return {
+          workspace,
+          status,
+        };
+      }
+      let targetPath = normalizeText(status.metadata?.worktreePath);
+      if (!targetPath) {
+        targetPath = status.suggestedWorktreePath;
+      }
+      const normalizedTargetPath = path.resolve(targetPath);
+      const listedEntry = status.worktrees.find((entry) => path.resolve(entry.worktree) === normalizedTargetPath);
+      if (!listedEntry) {
+        fs.mkdirSync(path.dirname(normalizedTargetPath), { recursive: true });
+        runGit(status.repoRoot, ["worktree", "add", "--detach", normalizedTargetPath, "HEAD"]);
+      }
+      const metadata = {
+        enabled: true,
+        repoRoot: status.repoRoot,
+        worktreePath: normalizedTargetPath,
+        createdAt: status.metadata?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.store.setJsonAppSetting(worktreeSettingKey(workspaceId), metadata);
+      const updatedWorkspace = this.store.updateWorkspace(workspaceId, { workdir: normalizedTargetPath });
+      this.store.addOperationAudit({
+        workspaceId,
+        agentName: null,
+        operationType: "git.worktree.ensure",
+        targetRef: normalizedTargetPath,
+        status: "completed",
+        requestedBy,
+        source,
+        details: {
+          repoRoot: status.repoRoot,
+          worktreePath: normalizedTargetPath,
+        },
+      });
+      this._emit("workspace.worktree.updated", {
+        type: "workspace.worktree.updated",
+        workspaceId,
+        worktreePath: normalizedTargetPath,
+        repoRoot: status.repoRoot,
+        source,
+        requestedBy,
+      });
+      return {
+        workspace: updatedWorkspace,
+        status: this.getWorkspaceWorktreeStatus({
+          workspaceId,
+          workdir: normalizedTargetPath,
+        }),
+      };
+    });
   }
 
   createCheckpoint({

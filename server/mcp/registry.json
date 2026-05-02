@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "targetFiles": {
+    "claude": [
+      ".claude\\mcp.json"
+    ],
+    "gemini": [
+      ".gemini\\mcp.json"
+    ],
+    "copilot": [
+      ".github\\copilot\\mcp.json"
+    ],
+    "codex": [
+      ".codex\\mcp.json"
+    ]
+  },
+  "servers": [
+    {
+      "id": "workspace-files",
+      "title": "Workspace files",
+      "targets": [
+        "claude",
+        "gemini",
+        "copilot",
+        "codex"
+      ],
+      "source": "workspace-files.json"
+    },
+    {
+      "id": "git-tools",
+      "title": "Git tools",
+      "targets": [
+        "claude",
+        "gemini",
+        "copilot",
+        "codex"
+      ],
+      "source": "git-tools.json"
+    }
+  ]
+}

@@ -128,7 +128,13 @@
 
 ## 現在の進捗
 
-### live 実行サマリ
+### 自動回帰ベースライン
+
+- base regression suite: **75 通過 / 0 失敗**
+- extended regression suite: **365 通過 / 0 失敗**
+- Phase E headless UI smoke: workspace settings の dashboard / task board / workflow validation まで確認済み
+
+### live 実行サマリ（履歴）
 
 - `passed`: 4
 - `failed`: 1

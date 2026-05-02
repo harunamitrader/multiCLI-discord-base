@@ -26,7 +26,13 @@ Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル U
 - 途中応答を UI / Discord に段階的に反映する
 - scheduler から既存 workspace agent へ定期実行する
 - custom agent を UI から追加・編集する
+- workspace settings から durability / resume、checkpoint / rollback、task claim / handoff を運用する
+- workspace profile（mode / persona / autonomy / notes）を prompt prelude に反映する
+- review / isolation、isolated worktree、semantic lock を UI から確認・操作する
+- automation / extensions として dashboard / task board / workflow validation / drift / memory automation / skills / MCP を確認する
 - chat bubble 内の URL / Windows path / `file:///` を開き、軽量 file viewer で中身を確認する
+- 左 sidebar の workspace accordion 内で agent ごとの terminal 状態を確認する
+- 未起動 agent は Start ボタン、main chat 送信、terminal 補助入力送信のいずれかで起動する
 
 ## 今の仕様で重要な前提
 
@@ -36,6 +42,9 @@ Gemini CLI / Claude Code / GitHub Copilot CLI / Codex CLI を、**ローカル U
 4. Discord は **1 channel ↔ 1 workspace** です。
 5. binding のない channel では、plain message で勝手に workspace を作りません。
 6. Discord slash command は廃止済みです。`help!`、`status! [agent]`、`output! [agent]`、`enter! [agent]`、`approve! [agent]`、`deny! [agent]`、`bindings!`、`resume! [agent]`、`restart! [agent]`、`checkpoints!`、`rollback!`、`skills! [agent]`、`new!`、`workspace!`、`agents!`、`stop!`、`agentName? prompt` を使います。
+7. workspace sidebar は **active / inactive 分割なしの単一 ordered list** です。
+8. Terminal を開いただけでは CLI は起動しません。起動条件は **Start ボタン / main chat 送信 / terminal 補助入力送信** です。
+9. main chat の assistant 保存は、必要最低限の trim を除き **ユーザープロンプト後の raw 寄り transcript** を優先します。
 
 ## 対応 CLI
 
@@ -242,6 +251,15 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 4. `agentName? prompt` で子 agent に送る
 5. agent カードを開くと、その agent の Terminal を見られる
 
+workspace settings では、次の運用 surface を使えます。
+
+- **Durability / resume**: saved session ref、last run state、operation audit
+- **Git safety**: checkpoint 作成、rollback preview / apply
+- **Task coordination**: claim / handoff、現在の owner / queue
+- **Workspace profile**: mode / persona / autonomy / notes
+- **Review / isolation**: diff preview、isolated worktree、semantic locks
+- **Automation / extensions**: daemon dashboard、task board、workflow validation、drift、memory automation、skills、MCP
+
 ### Discord
 
 主なコマンド:
@@ -298,6 +316,18 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 - `server\src\pty-service.js`
 - `server\src\agent-bridge.js`
 - `server\src\discord-adapter.js`
+- `server\src\scheduler.js`
+- `server\src\semantic-lock-manager.js`
+- `server\src\memory-automation-service.js`
+- `server\src\mcp-manager.js`
+- `server\src\store.js`
+
+### データ
+
+- `data\bridge.sqlite`（workspace / messages / runs / audits / bindings / checkpoints）
+- `data\state.json`（runtime snapshot）
+- `data\logs\`（運用ログ）
+- `data\memory\` / `data\memory-automation\` / `data\schedules\`
 
 ### 設定
 
@@ -325,7 +355,7 @@ DISCORD_ALLOWED_CHANNEL_IDS=
 
 - base 回帰 suite: `scripts\test-multiCLI-discord-base.mjs`
 - extended 回帰 suite: `scripts\test-multiCLI-discord-base-extended.mjs`
-- 最新結果: **73/73**（base）、**261/261**（extended）
+- 最新結果: **75/75**（base）、**365/365**（extended）
 - stress test 台帳: **done 261 / pending 0**
 
 ## ライセンス

@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-const MAX_ACTIVE_WORKSPACES = 5;
-
 // ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------
@@ -294,7 +292,7 @@ export class Store {
     this.getWorkspaceByNameStatement = db.prepare(`SELECT * FROM workspaces WHERE name=?`);
     this.listWorkspacesStatement = db.prepare(`
       SELECT * FROM workspaces
-      ORDER BY is_sidebar_active DESC, sort_order ASC, created_at ASC, name ASC
+      ORDER BY sort_order ASC, created_at ASC, name ASC
     `);
     this.getActiveWorkspaceStatement = db.prepare(
       `SELECT * FROM workspaces WHERE is_active=1 LIMIT 1`
@@ -322,7 +320,6 @@ export class Store {
     this.maxWorkspaceSortOrderStatement = db.prepare(`
       SELECT MAX(sort_order) AS max_sort_order
       FROM workspaces
-      WHERE is_sidebar_active = ?
     `);
     this.updateWorkspacePlacementStatement = db.prepare(`
       UPDATE workspaces
@@ -338,6 +335,7 @@ export class Store {
         value=excluded.value,
         updated_at=excluded.updated_at
     `);
+    this.deleteAppSettingStatement = db.prepare(`DELETE FROM app_settings WHERE key=?`);
 
     this._normalizeWorkspaceSidebarState();
 
@@ -650,11 +648,8 @@ export class Store {
 
   createWorkspace({ id, name, workdir, contextInjectionEnabled = null, isSidebarActive = null } = {}) {
     const isFirstWorkspace = this.listWorkspaces().length === 0 ? 1 : 0;
-    const resolvedSidebarActive =
-      isSidebarActive == null
-        ? (isFirstWorkspace ? 1 : (this.countSidebarActiveWorkspaces() < MAX_ACTIVE_WORKSPACES ? 1 : 0))
-        : (isSidebarActive ? 1 : 0);
-    const sortOrder = this.getNextWorkspaceSortOrder(Boolean(resolvedSidebarActive));
+    const resolvedSidebarActive = isSidebarActive === false ? 1 : 1;
+    const sortOrder = this.getNextWorkspaceSortOrder();
     this.insertWorkspaceStatement.run(
       id ?? randomUUID(),
       name,
@@ -688,7 +683,7 @@ export class Store {
   }
 
   getNextWorkspaceSortOrder(isSidebarActive) {
-    const row = this.maxWorkspaceSortOrderStatement.get(isSidebarActive ? 1 : 0);
+    const row = this.maxWorkspaceSortOrderStatement.get();
     if (row?.max_sort_order == null) return 0;
     const value = Number(row?.max_sort_order);
     return Number.isFinite(value) ? value + 1 : 0;
@@ -720,7 +715,7 @@ export class Store {
         : contextInjectionEnabled == null
           ? null
           : (contextInjectionEnabled ? 1 : 0),
-      isSidebarActive === undefined ? (ws.isSidebarActive ? 1 : 0) : (isSidebarActive ? 1 : 0),
+      1,
       sortOrder === undefined
         ? (Number.isFinite(Number(ws.sortOrder)) ? Number(ws.sortOrder) : 0)
         : Math.max(0, Number(sortOrder) || 0),
@@ -735,7 +730,7 @@ export class Store {
     try {
       for (const item of items) {
         this.updateWorkspacePlacementStatement.run(
-          item.isSidebarActive ? 1 : 0,
+          1,
           Math.max(0, Number(item.sortOrder) || 0),
           item.id,
         );
@@ -764,6 +759,10 @@ export class Store {
     this.deleteRunsByWorkspaceStatement.run(id);
     this.deleteAgentSessionsByWorkspaceStatement.run(id);
     this.deleteWorkspaceAgentsByWorkspaceStatement.run(id);
+    this.deleteAppSettingStatement.run(`workspace_coordination:${id}`);
+    this.deleteAppSettingStatement.run(`workspace_profile:${id}`);
+    this.deleteAppSettingStatement.run(`workspace_semantic_locks:${id}`);
+    this.deleteAppSettingStatement.run(`workspace_worktree:${id}`);
     this.deleteWorkspaceStatement.run(id);
     this._normalizeWorkspaceSidebarState();
     return ws;
@@ -773,6 +772,37 @@ export class Store {
     return {
       defaultWorkdir: this.getAppSettingStatement.get("default_workdir")?.value ?? "",
     };
+  }
+
+  getAppSettingValue(key, fallback = "") {
+    const row = this.getAppSettingStatement.get(key);
+    return row?.value ?? fallback;
+  }
+
+  setAppSettingValue(key, value = "") {
+    this.upsertAppSettingStatement.run(key, value ?? "");
+    return this.getAppSettingValue(key, "");
+  }
+
+  getJsonAppSetting(key, fallback = null) {
+    const raw = this.getAppSettingValue(key, null);
+    if (raw == null || raw === "") {
+      return fallback;
+    }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  setJsonAppSetting(key, value) {
+    this.setAppSettingValue(key, JSON.stringify(value ?? null));
+    return this.getJsonAppSetting(key, null);
+  }
+
+  deleteAppSetting(key) {
+    this.deleteAppSettingStatement.run(key);
   }
 
   updateAppSettings({ defaultWorkdir } = {}) {
@@ -980,21 +1010,17 @@ export class Store {
 
   _normalizeWorkspaceSidebarState() {
     const rows = this.db.prepare(`
-      SELECT id, is_sidebar_active, sort_order, is_active, created_at, name
+      SELECT id, sort_order, created_at, name
       FROM workspaces
-      ORDER BY is_active DESC, created_at ASC, name ASC
+      ORDER BY sort_order ASC, created_at ASC, name ASC
     `).all();
     if (!rows.length) return;
 
-    const hasSidebarActive = rows.some((row) => Number(row.is_sidebar_active) === 1);
     const uniqueSortOrders = new Set(rows.map((row) => Number(row.sort_order)).filter(Number.isFinite));
     const sortLooksUninitialized = uniqueSortOrders.size <= 1;
 
     const normalizedRows = rows.map((row, index) => ({
       id: row.id,
-      isSidebarActive: hasSidebarActive
-        ? Boolean(row.is_sidebar_active)
-        : index === 0,
       sortOrder: sortLooksUninitialized ? index : Math.max(0, Number(row.sort_order) || 0),
       createdAt: row.created_at,
       name: row.name,
@@ -1005,23 +1031,17 @@ export class Store {
       String(left.createdAt || "").localeCompare(String(right.createdAt || "")) ||
       String(left.name || "").localeCompare(String(right.name || ""));
 
-    const active = normalizedRows.filter((row) => row.isSidebarActive).sort(byCurrentOrder);
-    const inactive = normalizedRows.filter((row) => !row.isSidebarActive).sort(byCurrentOrder);
-    const cappedActive = active.slice(0, MAX_ACTIVE_WORKSPACES).map((row, index) => ({
-      ...row,
-      isSidebarActive: true,
-      sortOrder: index,
-    }));
-    const normalizedInactive = [...active.slice(MAX_ACTIVE_WORKSPACES), ...inactive].map((row, index) => ({
-      ...row,
-      isSidebarActive: false,
-      sortOrder: index,
-    }));
+    const orderedRows = normalizedRows
+      .sort(byCurrentOrder)
+      .map((row, index) => ({
+        ...row,
+        sortOrder: index,
+      }));
 
     this.db.exec("BEGIN");
     try {
-      for (const row of [...cappedActive, ...normalizedInactive]) {
-        this.updateWorkspacePlacementStatement.run(row.isSidebarActive ? 1 : 0, row.sortOrder, row.id);
+      for (const row of orderedRows) {
+        this.updateWorkspacePlacementStatement.run(1, row.sortOrder, row.id);
       }
       this.db.exec("COMMIT");
     } catch (error) {
